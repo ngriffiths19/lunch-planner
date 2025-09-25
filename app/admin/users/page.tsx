@@ -3,12 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 
 type Role = 'staff' | 'catering' | 'admin';
-type Row = {
-  id: string;
-  email: string | null;
-  name: string | null;
-  role: Role | null;
-};
+type Row = { id: string; email: string | null; name: string | null; role: Role | null };
 
 export default function AdminUsers() {
   const [rows, setRows] = useState<Row[]>([]);
@@ -24,7 +19,7 @@ export default function AdminUsers() {
     setRows(j.users as Row[]);
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(); }, []);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -48,7 +43,6 @@ export default function AdminUsers() {
       setMsg(t);
       return;
     }
-    // reflect change locally
     setRows(prev => prev.map(p => (p.id === id ? { ...p, role } : p)));
   }
 
@@ -63,7 +57,7 @@ export default function AdminUsers() {
           value={q}
           onChange={e => setQ(e.target.value)}
         />
-        <button className="border rounded px-3 py-2" onClick={load} disabled={busy}>Refresh</button>
+        <button className="border rounded px-3 py-2" onClick={() => void load()} disabled={busy}>Refresh</button>
       </div>
 
       {msg && <div className="text-sm text-red-600">{msg}</div>}

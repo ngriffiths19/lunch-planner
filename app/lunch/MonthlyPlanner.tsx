@@ -129,7 +129,7 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
     })();
     return () => { gone = true; };
     // monthKey covers month & year; user controls account scope
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+ 
   }, [user.id, user.locationId, monthKey]);
 
   /* ---------- load per-day allowed items for this month ---------- */
@@ -147,7 +147,7 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
 
   useEffect(() => {
     loadAllowed(fmt(monthStart), fmt(monthEnd), user.locationId).catch(() => setAllowedMap({}));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [monthStart.getTime(), monthEnd.getTime(), user.locationId]);
 
   /* ---------- kitchen summary loader ---------- */
@@ -167,7 +167,7 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
       }
     })();
     return () => { gone = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [tab, monthStart.getTime(), monthEnd.getTime()]);
 
   /* ---------- pretty UI helpers ---------- */

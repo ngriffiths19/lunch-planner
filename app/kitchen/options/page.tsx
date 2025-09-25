@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Item = { id: string; name: string; active: boolean };
 
@@ -19,17 +19,17 @@ export default function DailyOptions() {
   const monthEnd   = useMemo(()=>endOfMonth(cursor),[cursor]);
 
   const [items, setItems] = useState<Item[]>([]);
-  const [allowed, setAllowed] = useState<Record<string, Set<string>>>({}); // date -> Set(itemId)
+  const [allowed, setAllowed] = useState<Record<string, Set<string>>>({});
   const [msg, setMsg] = useState<string | null>(null);
 
-  async function load() {
+  const load = useCallback(async () => {
     setMsg(null);
-    // load items
+    // items
     const ri = await fetch('/api/menu'); const ji = await ri.json();
     if (!ri.ok) throw new Error(ji.error || 'load items failed');
     setItems((ji.items as Item[]).filter(i=>i.active));
 
-    // load daily map
+    // daily options
     const r = await fetch(`/api/daily-menu?from=${fmt(monthStart)}&to=${fmt(monthEnd)}&locationId=${LOCATION_ID}`);
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'load daily failed');
@@ -38,9 +38,9 @@ export default function DailyOptions() {
       map[date] = new Set(arr);
     }
     setAllowed(map);
-  }
+  }, [monthStart, monthEnd]);
 
-  useEffect(()=>{ load().catch(e=>setMsg(String(e))); /* eslint-disable-next-line */ }, [cursor.getTime()]);
+  useEffect(() => { void load(); }, [load]);
 
   const weeks = useMemo(()=>{
     const firstMon = getMonOfWeek(monthStart);
@@ -112,7 +112,7 @@ export default function DailyOptions() {
                   </div>
 
                   <div className="mt-2 flex justify-end">
-                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>save(key)}>Save</button>
+                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>void save(key)}>Save</button>
                   </div>
                 </div>
               );
