@@ -1,10 +1,13 @@
 // app/api/profile/route.ts
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
 import { supabaseService } from '../../lib/supabase';
-import { requireRole } from '../_lib/requireRole';
 
+// GET current user + profile
 export async function GET() {
   const supa = createRouteHandlerClient({ cookies });
   const { data: { user } } = await supa.auth.getUser();
@@ -14,52 +17,40 @@ export async function GET() {
     .from('profiles')
     .select('id, name, role, location_id, lunch_session')
     .eq('id', user.id)
-    .single();
+    .maybeSingle();
 
   return NextResponse.json({ user, profile });
 }
 
-// Create/update basic profile fields WITHOUT touching role
+// Create/update basic profile fields WITHOUT touching role and WITHOUT clearing non-provided fields
 export async function POST(req: NextRequest) {
   const supa = createRouteHandlerClient({ cookies });
   const { data: { user } } = await supa.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const body = await req.json();
-  const payload: {
-    id: string;
-    name?: string | null;
-    location_id?: string | null;
-    lunch_session?: '12:30' | '13:00' | null;
-  } = {
-    id: user.id,
-    name: body.name ?? null,
-    location_id: body.location_id ?? null,
-    lunch_session: body.lunch_session ?? null,
-  };
+  const body = await req.json().catch(() => ({} as Record<string, unknown>));
 
-  // 🔑 NOTE: we DO NOT include `role` in this upsert
-  const { error } = await supabaseService()
+  // Build a changes object only with keys that are present (not undefined).
+  const changes: Record<string, unknown> = {};
+  if ('name' in body) changes.name = (body as any).name; // allow null to explicitly clear
+  if ('location_id' in body) changes.location_id = (body as any).location_id;
+  if ('lunch_session' in body) changes.lunch_session = (body as any).lunch_session;
+
+  // If nothing to change, just ensure row exists and exit
+  const svc = supabaseService();
+  const ensure = await svc
     .from('profiles')
-    .upsert(payload, { onConflict: 'id' });
+    .insert({ id: user.id }, { upsert: true, onConflict: 'id' });
+  if (ensure.error && ensure.error.code !== '23505') {
+    // ignore duplicate key (already exists)
+    return NextResponse.json({ error: ensure.error.message }, { status: 400 });
+  }
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-  return NextResponse.json({ ok: true });
-}
+  if (Object.keys(changes).length === 0) {
+    return NextResponse.json({ ok: true, noChange: true });
+  }
 
-// Admin-only: update someone’s role explicitly
-export async function PATCH(req: NextRequest) {
-  const guard = await requireRole(['admin']);
-  if (!guard.ok) return NextResponse.json({ error: 'Forbidden' }, { status: guard.status });
-
-  const { id, role } = (await req.json()) as { id: string; role: 'staff' | 'catering' | 'admin' };
-  if (!id || !role) return NextResponse.json({ error: 'id and role required' }, { status: 400 });
-
-  const { error } = await supabaseService()
-    .from('profiles')
-    .update({ role })
-    .eq('id', id);
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  const upd = await svc.from('profiles').update(changes).eq('id', user.id);
+  if (upd.error) return NextResponse.json({ error: upd.error.message }, { status: 400 });
   return NextResponse.json({ ok: true });
 }

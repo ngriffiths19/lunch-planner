@@ -1,3 +1,6 @@
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 // app/api/kitchen/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseService } from '../../lib/supabase';
@@ -61,7 +64,6 @@ export async function GET(req: NextRequest) {
   }
 
   const db = supabaseService();
-
   const { data, error } = await db
     .from('plan_lines')
     .select(`
