@@ -38,7 +38,6 @@ const startOfWeekMon = (d: Date) => {
   return addDays(d, offset);
 };
 
-/* ---------- props ---------- */
 interface Props {
   menu: MenuItem[];
   user: User;
@@ -58,6 +57,9 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
   // selections: YYYY-MM-DD -> itemId
   const [selections, setSelections] = useState<Record<string, string>>({});
 
+  // per-day allowed items: date -> Set(itemId)
+  const [allowedMap, setAllowedMap] = useState<Record<string, Set<string>>>({});
+
   // kitchen summary state
   const [summary, setSummary] = useState<KitchenSummary | null>(null);
   const [loadingSummary, setLoadingSummary] = useState(false);
@@ -71,11 +73,8 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
 
   /* ---------- build a correct Mon–Fri calendar matrix ---------- */
   const weeks = useMemo(() => {
-    // First Monday shown in grid
     const firstMonday = startOfWeekMon(monthStart);
-    // Friday of the week containing monthEnd
-    const lastFriday = addDays(startOfWeekMon(monthEnd), 4);
-
+    const lastFriday  = addDays(startOfWeekMon(monthEnd), 4);
     const rows: Date[][] = [];
     for (let wkStart = firstMonday; wkStart <= lastFriday; wkStart = addDays(wkStart, 7)) {
       rows.push([
@@ -129,7 +128,27 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
       }
     })();
     return () => { gone = true; };
+    // monthKey covers month & year; user controls account scope
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user.id, user.locationId, monthKey]);
+
+  /* ---------- load per-day allowed items for this month ---------- */
+  async function loadAllowed(from: string, to: string, locationId: string) {
+    const r = await fetch(`/api/daily-menu?from=${from}&to=${to}&locationId=${locationId}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed to load allowed items');
+    const map: Record<string, Set<string>> = {};
+    const raw = (j.map as Record<string, string[]>) || {};
+    for (const [date, arr] of Object.entries(raw)) {
+      map[date] = new Set(arr);
+    }
+    setAllowedMap(map);
+  }
+
+  useEffect(() => {
+    loadAllowed(fmt(monthStart), fmt(monthEnd), user.locationId).catch(() => setAllowedMap({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monthStart.getTime(), monthEnd.getTime(), user.locationId]);
 
   /* ---------- kitchen summary loader ---------- */
   useEffect(() => {
@@ -142,13 +161,13 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
         const res = await getKitchenSummary(fmt(monthStart), fmt(monthEnd));
         if (!gone) setSummary(res);
       } catch (e: unknown) {
-        setSummaryError(e instanceof Error ? e.message : String(e));
-}
- finally {
+        if (!gone) setSummaryError(e instanceof Error ? e.message : String(e));
+      } finally {
         if (!gone) setLoadingSummary(false);
       }
     })();
     return () => { gone = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, monthStart.getTime(), monthEnd.getTime()]);
 
   /* ---------- pretty UI helpers ---------- */
@@ -226,6 +245,13 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
                   const key = fmt(d);
                   const outOfMonth = d.getUTCMonth() !== cursor.getUTCMonth();
                   const isToday = key === todayKey;
+
+                  // allowed options for this day (fallback to all active if undefined)
+                  const allowedSet = allowedMap[key];
+                  const options = allowedSet
+                    ? menuActive.filter(m => allowedSet.has(m.id))
+                    : menuActive;
+
                   return (
                     <div
                       key={key}
@@ -243,7 +269,7 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
                         onChange={(e) => setChoice(d, e.target.value)}
                       >
                         <option value="">—</option>
-                        {menuActive.map((m) => (
+                        {options.map((m) => (
                           <option key={m.id} value={m.id}>
                             {m.name}
                           </option>
