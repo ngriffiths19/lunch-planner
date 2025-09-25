@@ -6,6 +6,9 @@ export async function middleware(req: NextRequest) {
   const res = NextResponse.next();
   const supabase = createMiddlewareClient({ req, res });
   await supabase.auth.getSession(); // refresh/attach cookies
+  // in middleware.ts, after getSession()
+    res.headers.set('x-mw', '1'); // TEMP: proves middleware ran
+
   return res;
 }
 
