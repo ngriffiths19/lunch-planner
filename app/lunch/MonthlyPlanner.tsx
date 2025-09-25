@@ -129,7 +129,6 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
       }
     })();
     return () => { gone = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user.id, user.locationId, monthKey]);
 
   /* ---------- kitchen summary loader ---------- */
@@ -142,14 +141,14 @@ export default function MonthlyPlanner({ menu, user, onSubmit, getKitchenSummary
         setSummaryError(null);
         const res = await getKitchenSummary(fmt(monthStart), fmt(monthEnd));
         if (!gone) setSummary(res);
-      } catch (e: any) {
-        if (!gone) setSummaryError(e?.message ?? 'Failed to load kitchen summary');
-      } finally {
+      } catch (e: unknown) {
+        setSummaryError(e instanceof Error ? e.message : String(e));
+}
+ finally {
         if (!gone) setLoadingSummary(false);
       }
     })();
     return () => { gone = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, monthStart.getTime(), monthEnd.getTime()]);
 
   /* ---------- pretty UI helpers ---------- */

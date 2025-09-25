@@ -51,8 +51,9 @@ export default function LoginPage() {
       if (!res.ok) throw new Error('Profile upsert failed: ' + await res.text());
 
       router.replace('/lunch');
-    } catch (err:any) {
-      setMsg(err.message ?? 'Something went wrong');
+    } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        setMsg(message || 'Something went wrong');
     } finally { setBusy(false); }
   }
 
