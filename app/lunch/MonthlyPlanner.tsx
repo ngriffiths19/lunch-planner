@@ -16,7 +16,7 @@ type DayChoice =
 
 const HQ_LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
 
-/* ---------- date helpers ---------- */
+/* -------------------- date helpers -------------------- */
 function isoLocal(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -65,7 +65,7 @@ function buildMonthWeeks(year: number, monthIndex0: number) {
   return weeks;
 }
 
-/** Read Supabase auth cookie (for custom domain) → access token */
+/* -------------------- auth + parsing helpers -------------------- */
 function getSupabaseAccessToken(): string | null {
   const m = document.cookie.match(/sb-[^=]+-auth-token=([^;]+)/);
   if (!m) return null;
@@ -78,7 +78,6 @@ function getSupabaseAccessToken(): string | null {
   }
 }
 
-/** Group any flat rows into {date, items[]} using id→name map */
 function groupToDays(
   rows: any[],
   nameById: Map<string, string>
@@ -95,11 +94,8 @@ function groupToDays(
       r?.item_name ?? r?.name ?? (typeof r === 'string' ? r : undefined);
 
     let itemName: string | undefined;
-    if (typeof nm === 'string' && nm) {
-      itemName = nm;
-    } else if (typeof id === 'string' && id) {
-      itemName = nameById.get(id) ?? id;
-    }
+    if (typeof nm === 'string' && nm) itemName = nm;
+    else if (typeof id === 'string' && id) itemName = nameById.get(id) ?? id;
 
     if (!itemName) continue;
     if (!map.has(date)) map.set(date, []);
@@ -111,12 +107,12 @@ function groupToDays(
     .map(([date, items]) => ({ date, items }));
 }
 
-/* ---------- component ---------- */
+/* -------------------- component -------------------- */
 export default function MonthlyPlanner({
   menu,
   user,
   onSubmit,
-  getKitchenSummary, // not used here but kept
+  getKitchenSummary,
 }: {
   menu: MenuItem[];
   user: User;
@@ -130,41 +126,59 @@ export default function MonthlyPlanner({
 }) {
   // buckets by category
   const hotItems = useMemo(
-    () => menu.filter(m => m.category === 'hot' && m.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
-    [menu],
+    () =>
+      menu
+        .filter((m) => m.category === 'hot' && m.active !== false)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [menu]
   );
   const coldMains = useMemo(
-    () => menu.filter(m => m.category === 'cold_main' && m.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
-    [menu],
+    () =>
+      menu
+        .filter((m) => m.category === 'cold_main' && m.active !== false)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [menu]
   );
   const coldSides = useMemo(
-    () => menu.filter(m => m.category === 'cold_side' && m.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
-    [menu],
+    () =>
+      menu
+        .filter((m) => m.category === 'cold_side' && m.active !== false)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [menu]
   );
   const snacksCrisps = useMemo(
-    () => menu.filter(m => m.category === 'snack_crisps' && m.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
-    [menu],
+    () =>
+      menu
+        .filter((m) => m.category === 'snack_crisps' && m.active !== false)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [menu]
   );
   const snacksFruit = useMemo(
-    () => menu.filter(m => m.category === 'snack_fruit' && m.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
-    [menu],
+    () =>
+      menu
+        .filter((m) => m.category === 'snack_fruit' && m.active !== false)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [menu]
   );
   const snackAll = useMemo(
     () => [...snacksCrisps, ...snacksFruit].sort((a, b) => a.name.localeCompare(b.name)),
-    [snacksCrisps, snacksFruit],
+    [snacksCrisps, snacksFruit]
   );
 
-  // month navigation
+  // month nav
   const today = new Date();
   const [viewYear, setViewYear] = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
   const weeks = useMemo(() => buildMonthWeeks(viewYear, viewMonth), [viewYear, viewMonth]);
-  const workdayIsos = useMemo(() => weeks.flat().filter((x): x is string => !!x), [weeks]);
+  const workdayIsos = useMemo(
+    () => weeks.flat().filter((x): x is string => !!x),
+    [weeks]
+  );
 
   // choices per day
   const [choices, setChoices] = useState<Record<string, DayChoice>>({});
   useEffect(() => {
-    setChoices(prev => {
+    setChoices((prev) => {
       const next: Record<string, DayChoice> = {};
       for (const iso of workdayIsos) next[iso] = prev[iso] ?? { kind: 'hot', hotId: null };
       return next;
@@ -173,24 +187,29 @@ export default function MonthlyPlanner({
   }, [workdayIsos.join('|')]);
 
   function setKind(iso: string, kind: 'hot' | 'cold') {
-    setChoices(prev => {
+    setChoices((prev) => {
       const prevDay = prev[iso];
-      if (kind === 'hot') return { ...prev, [iso]: { kind: 'hot', hotId: prevDay?.kind === 'hot' ? prevDay.hotId ?? null : null } };
+      if (kind === 'hot')
+        return {
+          ...prev,
+          [iso]: { kind: 'hot', hotId: prevDay?.kind === 'hot' ? prevDay.hotId ?? null : null },
+        };
       return { ...prev, [iso]: { kind: 'cold', mainId: null, sideId: null, snackId: null } };
     });
   }
   function setHot(iso: string, id: string | null) {
-    setChoices(prev => ({ ...prev, [iso]: { kind: 'hot', hotId: id } }));
+    setChoices((prev) => ({ ...prev, [iso]: { kind: 'hot', hotId: id } }));
   }
   function setCold(iso: string, field: 'mainId' | 'sideId' | 'snackId', id: string | null) {
-    setChoices(prev => {
+    setChoices((prev) => {
       const cur = prev[iso];
-      const base: DayChoice = cur && cur.kind === 'cold' ? cur : { kind: 'cold', mainId: null, sideId: null, snackId: null };
+      const base: DayChoice =
+        cur && cur.kind === 'cold' ? cur : { kind: 'cold', mainId: null, sideId: null, snackId: null };
       return { ...prev, [iso]: { ...base, [field]: id } as DayChoice };
     });
   }
 
-  // submit month
+  // submit month (with dedupe)
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
@@ -199,20 +218,33 @@ export default function MonthlyPlanner({
     setMsg(null);
     try {
       const lines: { date: string; itemId: string }[] = [];
+      const seen = new Set<string>();
+
       for (const iso of workdayIsos) {
         const c = choices[iso];
         if (!c) continue;
+
         if (c.kind === 'hot') {
-          if (c.hotId) lines.push({ date: iso, itemId: c.hotId });
+          if (c.hotId) {
+            const k = `${iso}|${c.hotId}`;
+            if (!seen.has(k)) {
+              seen.add(k);
+              lines.push({ date: iso, itemId: c.hotId });
+            }
+          }
         } else {
           const cc = c as any;
-          if (cc.mainId && cc.sideId && cc.snackId) {
-            lines.push({ date: iso, itemId: cc.mainId! });
-            lines.push({ date: iso, itemId: cc.sideId! });
-            lines.push({ date: iso, itemId: cc.snackId! });
+          for (const id of [cc.mainId, cc.sideId, cc.snackId]) {
+            if (!id) continue;
+            const k = `${iso}|${id}`;
+            if (!seen.has(k)) {
+              seen.add(k);
+              lines.push({ date: iso, itemId: id });
+            }
           }
         }
       }
+
       const month = yyyymm(workdayIsos[0] ?? isoLocal(new Date()));
       await onSubmit({
         userId: user.id,
@@ -228,7 +260,7 @@ export default function MonthlyPlanner({
     }
   }
 
-  // My Week (Mon→Fri of the current week) — robust parser + Bearer
+  // "My week" with tolerant parsing + bearer token
   const [mine, setMine] = useState<{ date: string; items: string[] }[] | null>(null);
   async function loadMyWeek() {
     setMsg(null);
@@ -253,9 +285,8 @@ export default function MonthlyPlanner({
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || 'Load failed');
 
-      const nameById = new Map(menu.map(m => [m.id, m.name]));
+      const nameById = new Map(menu.map((m) => [m.id, m.name]));
 
-      // A) { days: [{ date, items: [...] }] }
       if (Array.isArray(j?.days) || Array.isArray(j?.data?.days)) {
         const arr = Array.isArray(j?.days) ? j.days : j.data.days;
         const normal = arr.map((d: any) => {
@@ -263,7 +294,8 @@ export default function MonthlyPlanner({
           const names = itemsArr
             .map((x: any) => {
               if (typeof x === 'string') return nameById.get(x) ?? x;
-              if (x && typeof x === 'object') return x.name ?? nameById.get(x.id ?? x.item_id) ?? '';
+              if (x && typeof x === 'object')
+                return x.name ?? nameById.get(x.id ?? x.item_id) ?? '';
               return '';
             })
             .filter(Boolean);
@@ -273,7 +305,6 @@ export default function MonthlyPlanner({
         return;
       }
 
-      // B) { byDate: [{ date, sessions:[{ items:[{name|id}] }...] }] }
       if (Array.isArray(j?.byDate)) {
         const rows: any[] = [];
         for (const day of j.byDate) {
@@ -284,7 +315,8 @@ export default function MonthlyPlanner({
             for (const it of items) {
               rows.push({
                 date,
-                item_name: it?.name ?? nameById.get(it?.id ?? it?.itemId ?? it?.item_id) ?? '',
+                item_name:
+                  it?.name ?? nameById.get(it?.id ?? it?.itemId ?? it?.item_id) ?? '',
                 item_id: it?.id ?? it?.itemId ?? it?.item_id,
               });
             }
@@ -294,7 +326,6 @@ export default function MonthlyPlanner({
         return;
       }
 
-      // C) flat rows under .rows/.lines/.data or direct array
       const flatCandidates =
         (Array.isArray(j?.rows) && j.rows) ||
         (Array.isArray(j?.lines) && j.lines) ||
@@ -305,8 +336,7 @@ export default function MonthlyPlanner({
         return;
       }
 
-      // D) nothing recognised
-      setMine([]);
+      setMine([]); // nothing recognised
     } catch (e: any) {
       setMsg({ kind: 'error', text: e?.message || 'Load failed' });
     }
@@ -325,23 +355,38 @@ export default function MonthlyPlanner({
     setViewMonth(d.getMonth());
   }
 
-  /* ---------- render ---------- */
+  /* -------------------- render -------------------- */
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold">Monthly Planner</div>
         <div className="flex items-center gap-2">
-          <button className="border rounded px-3 py-1" onClick={prevMonth}>← Prev</button>
+          <button className="border rounded px-3 py-1" onClick={prevMonth}>
+            ← Prev
+          </button>
           <div className="text-sm font-medium">
-            {new Date(viewYear, viewMonth, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })}
+            {new Date(viewYear, viewMonth, 1).toLocaleString(undefined, {
+              month: 'long',
+              year: 'numeric',
+            })}
           </div>
-          <button className="border rounded px-3 py-1" onClick={nextMonth}>Next →</button>
+          <button className="border rounded px-3 py-1" onClick={nextMonth}>
+            Next →
+          </button>
         </div>
       </div>
 
-      {msg && <div className={`text-sm ${msg.kind === 'ok' ? 'text-green-700' : 'text-red-600'}`}>{msg.text}</div>}
+      {msg && (
+        <div
+          className={`text-sm ${
+            msg.kind === 'ok' ? 'text-green-700' : 'text-red-600'
+          }`}
+        >
+          {msg.text}
+        </div>
+      )}
 
-      {/* Scroll container so header + grid fit on mobile */}
+      {/* Horizontal scroll container so header + grid fit on mobile */}
       <div className="overflow-x-auto">
         <div className="min-w-[640px] space-y-3">
           {/* Weekday header (always visible, even on mobile) */}
@@ -357,43 +402,104 @@ export default function MonthlyPlanner({
           {weeks.map((row, wIdx) => (
             <div key={wIdx} className="grid grid-cols-5 gap-3">
               {row.map((iso, idx) => {
-                if (!iso) return <div key={idx} className="rounded-xl border p-3 opacity-40 bg-gray-50" />;
-                const c = choices[iso] ?? ({ kind: 'hot', hotId: null } as DayChoice);
+                if (!iso)
+                  return (
+                    <div
+                      key={idx}
+                      className="rounded-xl border p-3 opacity-40 bg-gray-50"
+                    />
+                  );
+                const c =
+                  choices[iso] ??
+                  ({ kind: 'hot', hotId: null } as DayChoice);
+
+                /* ---- Responsive day cell (fits on phones) ---- */
                 return (
                   <div key={iso} className="rounded-xl border p-3 shadow-sm">
                     <div className="font-medium mb-2">{fmtDDMM(iso)}</div>
 
-                    <div className="flex items-center gap-3 mb-2 text-sm">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="radio" name={`kind-${iso}`} checked={c.kind === 'hot'} onChange={() => setKind(iso, 'hot')} />
+                    {/* radios row → wraps on mobile */}
+                    <div className="flex flex-wrap gap-3 mb-2 text-sm">
+                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name={`kind-${iso}`}
+                          checked={c.kind === 'hot'}
+                          onChange={() => setKind(iso, 'hot')}
+                        />
                         Hot
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="radio" name={`kind-${iso}`} checked={c.kind === 'cold'} onChange={() => setKind(iso, 'cold')} />
+                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name={`kind-${iso}`}
+                          checked={c.kind === 'cold'}
+                          onChange={() => setKind(iso, 'cold')}
+                        />
                         Cold
                       </label>
                     </div>
 
                     {c.kind === 'hot' ? (
-                      <select className="border rounded px-3 py-2 w-full" value={c.hotId ?? ''} onChange={e => setHot(iso, e.target.value || null)}>
-                        <option value="">— Select hot —</option>
-                        {hotItems.map(mi => (
-                          <option key={mi.id} value={mi.id}>{mi.name}</option>
-                        ))}
-                      </select>
+                      <div className="grid grid-cols-1">
+                        <select
+                          className="border rounded px-3 py-2 w-full"
+                          value={c.hotId ?? ''}
+                          onChange={(e) => setHot(iso, e.target.value || null)}
+                        >
+                          <option value="">— Select hot —</option>
+                          {hotItems.map((mi) => (
+                            <option key={mi.id} value={mi.id}>
+                              {mi.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                     ) : (
-                      <div className="space-y-2">
-                        <select className="border rounded px-3 py-2 w-full" value={(c as any).mainId ?? ''} onChange={e => setCold(iso, 'mainId', e.target.value || null)}>
+                      <div className="grid grid-cols-1 gap-2">
+                        <select
+                          className="border rounded px-3 py-2 w-full"
+                          value={(c as any).mainId ?? ''}
+                          onChange={(e) =>
+                            setCold(iso, 'mainId', e.target.value || null)
+                          }
+                        >
                           <option value="">— Cold main —</option>
-                          {coldMains.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                          {coldMains.map((mi) => (
+                            <option key={mi.id} value={mi.id}>
+                              {mi.name}
+                            </option>
+                          ))}
                         </select>
-                        <select className="border rounded px-3 py-2 w-full" value={(c as any).sideId ?? ''} onChange={e => setCold(iso, 'sideId', e.target.value || null)}>
+
+                        <select
+                          className="border rounded px-3 py-2 w-full"
+                          value={(c as any).sideId ?? ''}
+                          onChange={(e) =>
+                            setCold(iso, 'sideId', e.target.value || null)
+                          }
+                        >
                           <option value="">— Cold side —</option>
-                          {coldSides.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                          {coldSides.map((mi) => (
+                            <option key={mi.id} value={mi.id}>
+                              {mi.name}
+                            </option>
+                          ))}
                         </select>
-                        <select className="border rounded px-3 py-2 w-full" value={(c as any).snackId ?? ''} onChange={e => setCold(iso, 'snackId', e.target.value || null)}>
+
+                        <select
+                          className="border rounded px-3 py-2 w-full"
+                          value={(c as any).snackId ?? ''}
+                          onChange={(e) =>
+                            setCold(iso, 'snackId', e.target.value || null)
+                          }
+                        >
                           <option value="">— Snack (crisps/fruit) —</option>
-                          {snackAll.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                          {snackAll.map((mi) => (
+                            <option key={mi.id} value={mi.id}>
+                              {mi.name}
+                            </option>
+                          ))}
                         </select>
                       </div>
                     )}
@@ -406,10 +512,17 @@ export default function MonthlyPlanner({
       </div>
 
       <div className="flex items-center gap-3">
-        <button className="rounded border px-4 py-2 hover:bg-gray-50" onClick={() => void submitMonth()} disabled={saving}>
+        <button
+          className="rounded border px-4 py-2 hover:bg-gray-50"
+          onClick={() => void submitMonth()}
+          disabled={saving}
+        >
           {saving ? 'Saving…' : 'Submit month'}
         </button>
-        <button className="rounded border px-3 py-2 hover:bg-gray-50" onClick={() => void loadMyWeek()}>
+        <button
+          className="rounded border px-3 py-2 hover:bg-gray-50"
+          onClick={() => void loadMyWeek()}
+        >
           My week
         </button>
       </div>
@@ -417,13 +530,20 @@ export default function MonthlyPlanner({
       {mine && (
         <div className="mt-3 border rounded p-3">
           <div className="font-medium mb-1">Your selections</div>
-          <ul className="text-sm space-y-1">
-            {mine.map(d => (
-              <li key={d.date}>
-                <span className="font-semibold">{fmtDDMM(d.date)}:</span> {d.items.join(', ')}
-              </li>
-            ))}
-          </ul>
+          {mine.length === 0 ? (
+            <div className="text-sm text-gray-600">
+              No selections found for this week.
+            </div>
+          ) : (
+            <ul className="text-sm space-y-1">
+              {mine.map((d) => (
+                <li key={d.date}>
+                  <span className="font-semibold">{fmtDDMM(d.date)}:</span>{' '}
+                  {d.items.join(', ')}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>
