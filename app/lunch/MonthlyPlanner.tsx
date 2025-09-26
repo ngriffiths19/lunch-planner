@@ -16,7 +16,7 @@ type DayChoice =
 
 const HQ_LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
 
-// ---------- date helpers ----------
+/* ---------- helpers ---------- */
 function isoLocal(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -43,48 +43,45 @@ function monthBounds(year: number, monthIndex0: number) {
   const end = new Date(year, monthIndex0 + 1, 0);
   return { start, end };
 }
-
-/** Build weeks for a month as arrays of Mon→Fri ISO dates.
- *  Each "week" contains 5 dates; days outside the month are marked with `null`
- *  so the grid stays aligned visually.
- */
 function buildMonthWeeks(year: number, monthIndex0: number) {
   const { start, end } = monthBounds(year, monthIndex0);
-
-  // anchor to the Monday on/before the 1st
   const cur = mondayOf(start);
   const lastIso = isoLocal(end);
-
   const weeks: (string | null)[][] = [];
   while (true) {
     const row: (string | null)[] = [];
     const rowStart = new Date(cur);
-
     for (let i = 0; i < 5; i++) {
       const d = new Date(rowStart);
       d.setDate(rowStart.getDate() + i);
       const iso = isoLocal(d);
-
-      if (d.getMonth() !== monthIndex0) row.push(null);
-      else row.push(iso);
+      row.push(d.getMonth() === monthIndex0 ? iso : null);
     }
-
     weeks.push(row);
-
-    // advance 7 days to next Monday
     cur.setDate(cur.getDate() + 7);
-    if (cur > end && weeks[weeks.length - 1].every(x => x === null)) break;
     if (isoLocal(cur) > lastIso && cur.getDay() === 1) break;
   }
   return weeks;
 }
+// read Supabase auth cookie → access token
+function getSupabaseAccessToken(): string | null {
+  const m = document.cookie.match(/sb-[^=]+-auth-token=([^;]+)/);
+  if (!m) return null;
+  try {
+    const raw = decodeURIComponent(m[1]);
+    const parsed = JSON.parse(raw);
+    return parsed?.access_token ?? parsed?.currentSession?.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
 
-// ---------- component ----------
+/* ---------- component ---------- */
 export default function MonthlyPlanner({
   menu,
   user,
   onSubmit,
-  getKitchenSummary, // not used in this version but kept for parity
+  getKitchenSummary, // kept for parity
 }: {
   menu: MenuItem[];
   user: User;
@@ -96,7 +93,7 @@ export default function MonthlyPlanner({
   }) => Promise<void>;
   getKitchenSummary: (from: string, to: string) => Promise<KitchenSummary>;
 }) {
-  // categories for pickers
+  // categories
   const hotItems = useMemo(
     () => menu.filter(m => m.category === 'hot' && m.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
     [menu],
@@ -122,18 +119,14 @@ export default function MonthlyPlanner({
     [snacksCrisps, snacksFruit],
   );
 
-  // month navigation
+  // month nav
   const today = new Date();
   const [viewYear, setViewYear] = useState(today.getFullYear());
-  const [viewMonth, setViewMonth] = useState(today.getMonth()); // 0..11
+  const [viewMonth, setViewMonth] = useState(today.getMonth());
   const weeks = useMemo(() => buildMonthWeeks(viewYear, viewMonth), [viewYear, viewMonth]);
+  const workdayIsos = useMemo(() => weeks.flat().filter((x): x is string => !!x), [weeks]);
 
-  const workdayIsos = useMemo(
-    () => weeks.flat().filter((x): x is string => !!x),
-    [weeks],
-  );
-
-  // choices per day
+  // choices
   const [choices, setChoices] = useState<Record<string, DayChoice>>({});
   useEffect(() => {
     setChoices(prev => {
@@ -177,10 +170,11 @@ export default function MonthlyPlanner({
         if (c.kind === 'hot') {
           if (c.hotId) lines.push({ date: iso, itemId: c.hotId });
         } else {
-          if ((c as any).mainId && (c as any).sideId && (c as any).snackId) {
-            lines.push({ date: iso, itemId: (c as any).mainId! });
-            lines.push({ date: iso, itemId: (c as any).sideId! });
-            lines.push({ date: iso, itemId: (c as any).snackId! });
+          const cc = c as any;
+          if (cc.mainId && cc.sideId && cc.snackId) {
+            lines.push({ date: iso, itemId: cc.mainId! });
+            lines.push({ date: iso, itemId: cc.sideId! });
+            lines.push({ date: iso, itemId: cc.snackId! });
           }
         }
       }
@@ -199,107 +193,145 @@ export default function MonthlyPlanner({
     }
   }
 
-  // My Week (current week Mon→Fri)
+  // My Week (current week Mon–Fri) WITH BEARER TOKEN
   const [mine, setMine] = useState<{ date: string; items: string[] }[] | null>(null);
   async function loadMyWeek() {
-    setMsg(null); setMine(null);
+    setMsg(null);
+    setMine(null);
     try {
       const mon = mondayOf(new Date());
-      const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
-      const from = isoLocal(mon), to = isoLocal(fri);
-      const r = await fetch(`/api/plan?from=${from}&to=${to}&locationId=${user.locationId ?? HQ_LOCATION_ID}`, { credentials: 'include' });
+      const fri = new Date(mon);
+      fri.setDate(mon.getDate() + 4);
+      const from = isoLocal(mon);
+      const to = isoLocal(fri);
+
+      const token = getSupabaseAccessToken();
+      const r = await fetch(
+        `/api/plan?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&locationId=${encodeURIComponent(
+          user.locationId ?? HQ_LOCATION_ID,
+        )}`,
+        {
+          credentials: 'include',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        },
+      );
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || 'Load failed');
 
-      // normalise to names
+      // normalise to names regardless of shape
       const nameById = new Map(menu.map(m => [m.id, m.name]));
       const days = (j.days ?? []).map((d: any) => {
         const arr: any[] = Array.isArray(d.items) ? d.items : [];
-        const names = arr.map(x => {
-          if (typeof x === 'string') return nameById.get(x) ?? x;
-          if (x && typeof x === 'object') return x.name ?? nameById.get(x.id) ?? '';
-          return '';
-        }).filter(Boolean);
+        const names = arr
+          .map(x => {
+            if (typeof x === 'string') return nameById.get(x) ?? x;
+            if (x && typeof x === 'object') return x.name ?? nameById.get(x.id) ?? '';
+            return '';
+          })
+          .filter(Boolean);
         return { date: d.date, items: names };
       });
+
       setMine(days);
-    } catch (e:any) {
-      setMsg({ kind:'error', text: e?.message || 'Load failed' });
+    } catch (e: any) {
+      setMsg({ kind: 'error', text: e?.message || 'Load failed' });
     }
   }
 
   function prevMonth() {
     const d = new Date(viewYear, viewMonth, 1);
     d.setMonth(d.getMonth() - 1);
-    setViewYear(d.getFullYear()); setViewMonth(d.getMonth());
+    setViewYear(d.getFullYear());
+    setViewMonth(d.getMonth());
   }
   function nextMonth() {
     const d = new Date(viewYear, viewMonth, 1);
     d.setMonth(d.getMonth() + 1);
-    setViewYear(d.getFullYear()); setViewMonth(d.getMonth());
+    setViewYear(d.getFullYear());
+    setViewMonth(d.getMonth());
   }
 
+  /* ---------- render ---------- */
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="text-lg font-semibold">Monthly Planner (Mon–Fri)</div>
+        <div className="text-lg font-semibold">Monthly Planner</div>
         <div className="flex items-center gap-2">
           <button className="border rounded px-3 py-1" onClick={prevMonth}>← Prev</button>
           <div className="text-sm font-medium">
-            {new Date(viewYear, viewMonth, 1).toLocaleString(undefined, { month:'long', year:'numeric' })}
+            {new Date(viewYear, viewMonth, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })}
           </div>
           <button className="border rounded px-3 py-1" onClick={nextMonth}>Next →</button>
         </div>
       </div>
 
-      {msg && <div className={`text-sm ${msg.kind==='ok'?'text-green-700':'text-red-600'}`}>{msg.text}</div>}
+      {msg && <div className={`text-sm ${msg.kind === 'ok' ? 'text-green-700' : 'text-red-600'}`}>{msg.text}</div>}
+
+      {/* === weekday header (Mon–Fri) === */}
+      <div className="hidden md:grid grid-cols-5 gap-3 text-xs uppercase tracking-wide text-gray-500">
+        <div>Monday</div>
+        <div>Tuesday</div>
+        <div>Wednesday</div>
+        <div>Thursday</div>
+        <div>Friday</div>
+      </div>
 
       {/* Month grid: each row is a week; five columns for Mon..Fri */}
       <div className="space-y-3">
         {weeks.map((row, wIdx) => (
           <div key={wIdx} className="grid grid-cols-1 md:grid-cols-5 gap-3">
             {row.map((iso, idx) => {
-              if (!iso) {
-                return <div key={idx} className="rounded-xl border p-3 opacity-40 bg-gray-50" />;
-              }
-              const c = choices[iso] ?? ({ kind:'hot', hotId: null } as DayChoice);
+              if (!iso) return <div key={idx} className="rounded-xl border p-3 opacity-40 bg-gray-50" />;
+              const c = choices[iso] ?? ({ kind: 'hot', hotId: null } as DayChoice);
               return (
                 <div key={iso} className="rounded-xl border p-3 shadow-sm">
                   <div className="font-medium mb-2">{fmtDDMM(iso)}</div>
 
                   <div className="flex items-center gap-3 mb-2 text-sm">
                     <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name={`kind-${iso}`} checked={c.kind==='hot'} onChange={()=>setKind(iso,'hot')} />
+                      <input type="radio" name={`kind-${iso}`} checked={c.kind === 'hot'} onChange={() => setKind(iso, 'hot')} />
                       Hot
                     </label>
                     <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="radio" name={`kind-${iso}`} checked={c.kind==='cold'} onChange={()=>setKind(iso,'cold')} />
+                      <input type="radio" name={`kind-${iso}`} checked={c.kind === 'cold'} onChange={() => setKind(iso, 'cold')} />
                       Cold
                     </label>
                   </div>
 
                   {c.kind === 'hot' ? (
-                    <select className="border rounded px-3 py-2 w-full" value={c.hotId ?? ''}
-                            onChange={(e)=> setHot(iso, e.target.value || null)}>
+                    <select className="border rounded px-3 py-2 w-full" value={c.hotId ?? ''} onChange={e => setHot(iso, e.target.value || null)}>
                       <option value="">— Select hot —</option>
-                      {hotItems.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                      {hotItems.map(mi => (
+                        <option key={mi.id} value={mi.id}>
+                          {mi.name}
+                        </option>
+                      ))}
                     </select>
                   ) : (
                     <div className="space-y-2">
-                      <select className="border rounded px-3 py-2 w-full" value={(c as any).mainId ?? ''}
-                              onChange={(e)=> setCold(iso, 'mainId', e.target.value || null)}>
+                      <select className="border rounded px-3 py-2 w-full" value={(c as any).mainId ?? ''} onChange={e => setCold(iso, 'mainId', e.target.value || null)}>
                         <option value="">— Cold main —</option>
-                        {coldMains.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                        {coldMains.map(mi => (
+                          <option key={mi.id} value={mi.id}>
+                            {mi.name}
+                          </option>
+                        ))}
                       </select>
-                      <select className="border rounded px-3 py-2 w-full" value={(c as any).sideId ?? ''}
-                              onChange={(e)=> setCold(iso, 'sideId', e.target.value || null)}>
+                      <select className="border rounded px-3 py-2 w-full" value={(c as any).sideId ?? ''} onChange={e => setCold(iso, 'sideId', e.target.value || null)}>
                         <option value="">— Cold side —</option>
-                        {coldSides.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                        {coldSides.map(mi => (
+                          <option key={mi.id} value={mi.id}>
+                            {mi.name}
+                          </option>
+                        ))}
                       </select>
-                      <select className="border rounded px-3 py-2 w-full" value={(c as any).snackId ?? ''}
-                              onChange={(e)=> setCold(iso, 'snackId', e.target.value || null)}>
+                      <select className="border rounded px-3 py-2 w-full" value={(c as any).snackId ?? ''} onChange={e => setCold(iso, 'snackId', e.target.value || null)}>
                         <option value="">— Snack (crisps/fruit) —</option>
-                        {snackAll.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                        {snackAll.map(mi => (
+                          <option key={mi.id} value={mi.id}>
+                            {mi.name}
+                          </option>
+                        ))}
                       </select>
                     </div>
                   )}
@@ -311,10 +343,10 @@ export default function MonthlyPlanner({
       </div>
 
       <div className="flex items-center gap-3">
-        <button className="rounded border px-4 py-2 hover:bg-gray-50" onClick={()=>void submitMonth()} disabled={saving}>
+        <button className="rounded border px-4 py-2 hover:bg-gray-50" onClick={() => void submitMonth()} disabled={saving}>
           {saving ? 'Saving…' : 'Submit month'}
         </button>
-        <button className="rounded border px-3 py-2 hover:bg-gray-50" onClick={()=>void loadMyWeek()}>
+        <button className="rounded border px-3 py-2 hover:bg-gray-50" onClick={() => void loadMyWeek()}>
           My week
         </button>
       </div>
