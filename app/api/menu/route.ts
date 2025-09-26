@@ -6,9 +6,8 @@ export async function GET() {
   const svc = supabaseService();
   const { data, error } = await svc
     .from('menu_items')
-    .select('id, name, active, archived, category')
-    .eq('archived', false)
-    .eq('active', true)
+    .select('id, name, active, category')   // no archived here
+    .eq('active', true)                      // keep active filter
     .order('category', { ascending: true })
     .order('name', { ascending: true });
 
