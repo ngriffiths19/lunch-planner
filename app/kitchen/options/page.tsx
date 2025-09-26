@@ -1,125 +1,127 @@
 'use client';
-import { useCallback, useEffect, useMemo, useState } from 'react';
 
-type Item = { id: string; name: string; active: boolean };
+import { useEffect, useMemo, useState } from 'react';
 
-const fmt = (d: Date) => d.toISOString().slice(0,10);
-const startOfMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-const endOfMonth   = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth()+1, 0));
-const addDays      = (d: Date, n: number) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()+n));
-const getMonOfWeek = (d: Date) => { const dow = d.getUTCDay(); const off = dow===0?-6:1-dow; return addDays(d, off); };
+type Item = { id: string; name: string; category: string; active: boolean };
+type Day = { iso: string; items: string[] };
 
-const LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
+const HQ_LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
 
-export default function DailyOptions() {
-  const [cursor, setCursor] = useState(() => {
-    const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-  });
-  const monthStart = useMemo(()=>startOfMonth(cursor),[cursor]);
-  const monthEnd   = useMemo(()=>endOfMonth(cursor),[cursor]);
+function isoLocal(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
-  const [items, setItems] = useState<Item[]>([]);
-  const [allowed, setAllowed] = useState<Record<string, Set<string>>>({});
-  const [msg, setMsg] = useState<string | null>(null);
+export default function KitchenOptionsPage() {
+  const [menu, setMenu] = useState<Item[]>([]);
+  const [days, setDays] = useState<Day[]>([]);
+  const [msg, setMsg] = useState<{ kind:'ok'|'error'; text:string }|null>(null);
+  const [saving, setSaving] = useState(false);
 
-  const load = useCallback(async () => {
-    setMsg(null);
-    // items
-    const ri = await fetch('/api/menu'); const ji = await ri.json();
-    if (!ri.ok) throw new Error(ji.error || 'load items failed');
-    setItems((ji.items as Item[]).filter(i=>i.active));
+  // Current week Mon..Fri
+  const { weekFrom, weekTo } = useMemo(() => {
+    const today = new Date();
+    const dow = (today.getDay() + 6) % 7; // 0=Mon
+    const mon = new Date(today); mon.setDate(today.getDate()-dow); mon.setHours(0,0,0,0);
+    const fri = new Date(mon); fri.setDate(mon.getDate()+4);
+    return { weekFrom: isoLocal(mon), weekTo: isoLocal(fri) };
+  }, []);
 
-    // daily options
-    const r = await fetch(`/api/daily-menu?from=${fmt(monthStart)}&to=${fmt(monthEnd)}&locationId=${LOCATION_ID}`);
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'load daily failed');
-    const map: Record<string, Set<string>> = {};
-    for (const [date, arr] of Object.entries(j.map as Record<string,string[]>)) {
-      map[date] = new Set(arr);
-    }
-    setAllowed(map);
-  }, [monthStart, monthEnd]);
+  // Load base menu and existing daily-menu (but only HOT)
+  useEffect(() => {
+    (async () => {
+      setMsg(null);
+      try {
+        // All active items, then filter to hot
+        const rm = await fetch('/api/menu', { cache:'no-store', credentials:'include' });
+        const mj = await rm.json();
+        if (!rm.ok) throw new Error(mj.error || 'Failed to load menu');
+        const hot = (mj.items as Item[]).filter(x => String(x.category) === 'hot' && x.active !== false);
+        setMenu(hot);
 
-  useEffect(() => { void load(); }, [load]);
+        // Load current assignments for the week
+        const rd = await fetch(`/api/daily-menu?from=${weekFrom}&to=${weekTo}&locationId=${HQ_LOCATION_ID}`, { cache:'no-store', credentials:'include' });
+        const dj = await rd.json();
+        if (!rd.ok) throw new Error(dj.error || 'Failed to load week');
 
-  const weeks = useMemo(()=>{
-    const firstMon = getMonOfWeek(monthStart);
-    const lastFri  = addDays(getMonOfWeek(monthEnd), 4);
-    const rows: Date[][] = [];
-    for (let wk = firstMon; wk <= lastFri; wk = addDays(wk, 7)) {
-      rows.push([0,1,2,3,4].map(off => addDays(wk, off)));
-    }
-    return rows;
-  },[monthStart, monthEnd]);
+        const mapped: Day[] = (dj.days ?? []).map((d: any)=>({ iso: d.date, items: (d.itemIds ?? []).filter(Boolean) }));
+        // Fill missing days Mon..Fri
+        const list: Day[] = [];
+        const start = new Date(weekFrom); const end = new Date(weekTo);
+        for (let cur=new Date(start); cur<=end; cur.setDate(cur.getDate()+1)) {
+          const iso = isoLocal(cur);
+          const found = mapped.find(x => x.iso === iso);
+          list.push(found ?? { iso, items: [] });
+        }
+        setDays(list);
+      } catch (e:any) {
+        setMsg({ kind:'error', text: e?.message || 'Load failed' });
+      }
+    })();
+  }, [weekFrom, weekTo]);
 
-  function toggle(dateKey: string, id: string, on: boolean) {
-    setAllowed(prev => {
-      const s = new Set(prev[dateKey] ?? []);
-      on ? s.add(id) : s.delete(id);
-      return { ...prev, [dateKey]: s };
-    });
+  function toggle(iso: string, itemId: string) {
+    setDays(prev => prev.map(d => d.iso !== iso ? d : (
+      d.items.includes(itemId) ? { ...d, items: d.items.filter(x=>x!==itemId) } : { ...d, items: [...d.items, itemId] }
+    )));
   }
 
-  async function save(dateKey: string) {
-    const ids = Array.from(allowed[dateKey] ?? []);
-    const r = await fetch('/api/daily-menu', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ date: dateKey, locationId: LOCATION_ID, itemIds: ids })
-    });
-    if (!r.ok) setMsg(await r.text());
+  async function save() {
+    setSaving(true); setMsg(null);
+    try {
+      const payload = {
+        locationId: HQ_LOCATION_ID,
+        from: weekFrom,
+        to: weekTo,
+        days: days.map(d => ({ date: d.iso, itemIds: d.items })),
+      };
+      const r = await fetch('/api/daily-menu', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Save failed');
+      setMsg({ kind:'ok', text: 'Saved!' });
+    } catch (e:any) {
+      setMsg({ kind:'error', text: e?.message || 'Save failed' });
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
-    <div className="p-4 max-w-5xl mx-auto space-y-4">
-      <h1 className="text-xl font-semibold">Daily Options</h1>
+    <div className="p-4 space-y-4">
+      <h1 className="text-lg font-semibold">Kitchen › Hot options this week</h1>
+      <div className="text-sm text-gray-600">Week: {weekFrom} → {weekTo}</div>
+      {msg && <div className={`text-sm ${msg.kind==='ok'?'text-green-700':'text-red-600'}`}>{msg.text}</div>}
 
-      <div className="flex items-center gap-3">
-        <button className="border rounded px-3 py-1"
-                onClick={()=>setCursor(new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth()-1, 1)))}>← Prev</button>
-        <div className="font-medium">
-          {cursor.toLocaleString(undefined,{month:'long',year:'numeric', timeZone:'UTC'})}
-        </div>
-        <button className="border rounded px-3 py-1"
-                onClick={()=>setCursor(new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth()+1, 1)))}>Next →</button>
-      </div>
-
-      {msg && <div className="text-sm text-red-600">{msg}</div>}
-
-      <div className="grid gap-3">
-        {weeks.map((row, ri)=>(
-          <div key={ri} className="grid grid-cols-5 gap-3">
-            {row.map(d=>{
-              const key = fmt(d);
-              const out = d.getUTCMonth() !== cursor.getUTCMonth();
-              const sel = allowed[key] ?? new Set<string>();
-              return (
-                <div key={key} className={`rounded-xl border p-3 ${out?'opacity-40':''}`}>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-sm font-semibold">{d.getUTCDate()}</div>
-                    <div className="text-[10px] text-gray-500">{key}</div>
-                  </div>
-
-                  <div className="space-y-1 max-h-40 overflow-auto">
-                    {items.map(it=>(
-                      <label key={it.id} className="flex items-center gap-2 text-sm">
-                        <input type="checkbox"
-                               checked={sel.has(it.id)}
-                               onChange={e=>toggle(key, it.id, e.target.checked)} />
-                        {it.name}
-                      </label>
-                    ))}
-                    {items.length===0 && <div className="text-xs text-gray-500">No active dishes.</div>}
-                  </div>
-
-                  <div className="mt-2 flex justify-end">
-                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>void save(key)}>Save</button>
-                  </div>
-                </div>
-              );
-            })}
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {days.map(d => (
+          <div key={d.iso} className="rounded-xl border p-3 shadow-sm">
+            <div className="font-medium mb-2">{d.iso}</div>
+            <div className="space-y-1 max-h-56 overflow-auto pr-1">
+              {menu.map(mi => {
+                const picked = d.items.includes(mi.id);
+                return (
+                  <label key={mi.id}
+                         className={`flex items-center gap-2 text-sm rounded px-2 py-1 cursor-pointer ${picked?'bg-blue-50 border border-blue-200':'hover:bg-gray-50'}`}>
+                    <input type="checkbox" checked={picked} onChange={()=>toggle(d.iso, mi.id)} />
+                    <span className="truncate">{mi.name}</span>
+                  </label>
+                );
+              })}
+            </div>
           </div>
         ))}
       </div>
+
+      <button className="rounded-lg border px-4 py-2 hover:bg-gray-50" onClick={()=>void save()} disabled={saving}>
+        {saving ? 'Saving…' : 'Save week'}
+      </button>
     </div>
   );
 }

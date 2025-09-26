@@ -25,6 +25,62 @@ function yyyymm(dIso: string) {
   return `${y}-${m}`;
 }
 
+/** GET /api/plan?from=YYYY-MM-DD&to=YYYY-MM-DD&locationId=UUID
+ *  -> { days: [{ date, items: string[] }] } for the authenticated user
+ */
+export async function GET(req: NextRequest) {
+  const user = await getUserFromRequest(req);
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const url = new URL(req.url);
+  const from = url.searchParams.get('from');
+  const to = url.searchParams.get('to');
+  const locationId = url.searchParams.get('locationId');
+  if (!from || !to || !locationId) {
+    return NextResponse.json({ error: 'from, to, locationId required' }, { status: 400 });
+  }
+
+  const svc = supabaseService();
+  // Find header(s) for user + location + month window
+  const { data: headers, error: hErr } = await svc
+    .from('plans')
+    .select('id')
+    .eq('user_id', user.id)
+    .eq('location_id', locationId)
+    .gte('month', yyyymm(from))
+    .lte('month', yyyymm(to));
+
+  if (hErr) return NextResponse.json({ error: hErr.message }, { status: 400 });
+  if (!headers || headers.length === 0) return NextResponse.json({ days: [] });
+
+  const planIds = headers.map(h => h.id);
+  // Pull lines within date window; join to menu_items for names
+  const { data: lines, error: lErr } = await svc
+    .from('plan_lines')
+    .select('date, menu_items!inner(name)')
+    .in('plan_id', planIds)
+    .gte('date', from)
+    .lte('date', to);
+
+  if (lErr) return NextResponse.json({ error: lErr.message }, { status: 400 });
+
+  const byDate = new Map<string, string[]>();
+  (lines ?? []).forEach(r => {
+    const d = r.date as string;
+    const n = (r as any).menu_items?.name as string;
+    const list = byDate.get(d) ?? [];
+    if (n) list.push(n);
+    byDate.set(d, list);
+  });
+
+  const days = Array.from(byDate.entries()).map(([date, items]) => ({ date, items }));
+  return NextResponse.json({ days });
+}
+
+/** POST /api/plan
+ * Body: { locationId: string, month?: "YYYY-MM", lines: [{date, itemId}] }
+ * Replaces the month’s plan for the authenticated user.
+ */
 export async function POST(req: NextRequest) {
   const user = await getUserFromRequest(req);
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -33,25 +89,26 @@ export async function POST(req: NextRequest) {
   const locationId: string | undefined = body?.locationId;
   const lines: Line[] = Array.isArray(body?.lines) ? body.lines : [];
   const month: string | undefined = body?.month || (lines[0]?.date ? yyyymm(lines[0].date) : undefined);
-
   if (!locationId || !month) {
     return NextResponse.json({ error: 'locationId and month required' }, { status: 400 });
   }
 
   const svc = supabaseService();
 
-  // 1) wipe this user's month plan at this location
-  const del = await svc.from('plans')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('location_id', locationId)
-    .eq('month', month);
+  // Upsert header (unique constraint (user_id, month) assumed)
+  const { data: header, error: upErr } = await svc
+    .from('plans')
+    .upsert({ user_id: user.id, location_id: locationId, month }, { onConflict: 'user_id,month' })
+    .select('id')
+    .single();
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
+
+  // Replace lines for that header
+  const del = await svc.from('plan_lines').delete().eq('plan_id', header.id);
   if (del.error) return NextResponse.json({ error: del.error.message }, { status: 400 });
 
-  // 2) nothing to insert? ok
   if (lines.length === 0) return NextResponse.json({ ok: true });
 
-  // 3) de-dupe lines by (date,itemId)
   const seen = new Set<string>();
   const rows = [];
   for (const { date, itemId } of lines) {
@@ -59,18 +116,11 @@ export async function POST(req: NextRequest) {
     const key = `${date}::${itemId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    rows.push({
-      user_id: user.id,
-      location_id: locationId,
-      month,
-      date,
-      item_id: itemId,
-    });
+    rows.push({ plan_id: header.id, date, item_id: itemId });
   }
-
   if (rows.length === 0) return NextResponse.json({ ok: true });
 
-  const ins = await svc.from('plans').insert(rows);
+  const ins = await svc.from('plan_lines').insert(rows);
   if (ins.error) return NextResponse.json({ error: ins.error.message }, { status: 400 });
 
   return NextResponse.json({ ok: true });

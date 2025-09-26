@@ -12,21 +12,23 @@ async function getUser() {
 }
 async function assertCateringOrAdmin(userId: string) {
   const svc = supabaseService();
-  const { data: p } = await svc.from('profiles').select('role').eq('id', userId).maybeSingle();
+  const { data: p, error } = await svc.from('profiles').select('role').eq('id', userId).maybeSingle();
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
   if (!p || (p.role !== 'admin' && p.role !== 'catering')) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
   return null;
 }
 
-// GET: list
-export async function GET() {
+// GET: list items. Only active unless ?all=1
+export async function GET(req: NextRequest) {
+  const url = new URL(req.url);
+  const all = url.searchParams.get('all') === '1';
+
   const svc = supabaseService();
-  const { data, error } = await svc
-    .from('menu_items')
-    .select('id, name, active, category')
-    .order('category', { ascending: true })
-    .order('name', { ascending: true });
+  let q = svc.from('menu_items').select('id, name, active, category:category::text');
+  if (!all) q = q.eq('active', true);
+  const { data, error } = await q.order('category', { ascending: true }).order('name', { ascending: true });
   if (error) return NextResponse.json({ error: error.message }, { status: 400 });
   return NextResponse.json({ items: data ?? [] });
 }
@@ -48,7 +50,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true, id: ins.data?.[0]?.id });
 }
 
-// PATCH: toggle active { id, active }
+// PATCH: archive only { id, active:false }
 export async function PATCH(req: NextRequest) {
   const user = await getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -60,9 +62,12 @@ export async function PATCH(req: NextRequest) {
   if (!id || typeof active !== 'boolean') {
     return NextResponse.json({ error: 'id and active required' }, { status: 400 });
   }
+  if (active === true) {
+    return NextResponse.json({ error: 'Unarchive is disabled. Add a new item instead.' }, { status: 400 });
+  }
 
   const svc = supabaseService();
-  const upd = await svc.from('menu_items').update({ active }).eq('id', id);
+  const upd = await svc.from('menu_items').update({ active: false }).eq('id', id);
   if (upd.error) return NextResponse.json({ error: upd.error.message }, { status: 400 });
   return NextResponse.json({ ok: true });
 }
