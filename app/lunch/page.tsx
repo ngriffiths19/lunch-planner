@@ -1,29 +1,29 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import MonthlyPlanner from './MonthlyPlanner';
-import { supabaseBrowser } from '../lib/supabase-browser';
 
-type MenuItem = { id: string; name: string; active?: boolean };
+type MenuItem = { id: string; name: string; category: string; active?: boolean };
 type User = { id: string; name?: string; email?: string; locationId: string };
 type KitchenItem = { itemId: string; name: string; qty: number };
 type KitchenSession = { session: '12:30' | '13:00' | null; items: KitchenItem[] };
 type KitchenDay = { date: string; sessions: KitchenSession[] };
 type KitchenSummary = { byDate: KitchenDay[] };
-type MyDay = { date: string; items: string[] };
 
 const HQ_LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
 
-// ---- local date helpers ----
-function fmtIsoLocal(d: Date) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function fmtDDMMYYYY(iso: string) {
-  const [y, m, d] = iso.split('-');
-  return `${d}-${m}-${y}`;
+// Read Supabase auth cookie (works on custom domains too)
+function getSupabaseAccessToken(): string | null {
+  const m = document.cookie.match(/sb-[^=]+-auth-token=([^;]+)/);
+  if (!m) return null;
+  try {
+    const raw = decodeURIComponent(m[1]);
+    const parsed = JSON.parse(raw);
+    // Varies by SDK version; check both shapes:
+    return parsed?.access_token ?? parsed?.currentSession?.access_token ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export default function Page() {
@@ -31,10 +31,10 @@ export default function Page() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // --- load current user/profile + menu ---
   useEffect(() => {
     (async () => {
       try {
+        // 1) who am I?
         const rp = await fetch('/api/profile', { cache: 'no-store', credentials: 'include' });
         const pj = await rp.json();
         const locationId: string = pj?.profile?.location_id ?? HQ_LOCATION_ID;
@@ -46,26 +46,33 @@ export default function Page() {
         };
         setUser(u);
 
+        // 2) menu (must include category for the new planner)
+        // By default /api/menu returns only ACTIVE items (what we want)
         const rm = await fetch('/api/menu', { cache: 'no-store', credentials: 'include' });
         const mj = await rm.json();
-        setMenu((mj.items as MenuItem[]) ?? []);
+        if (!rm.ok) throw new Error(mj.error || 'Failed to load menu');
+        // Ensure each item has category
+        const items: MenuItem[] = (mj.items ?? []).map((x: any) => ({
+          id: String(x.id),
+          name: String(x.name),
+          category: String(x.category ?? 'hot'),
+          active: x.active !== false,
+        }));
+        setMenu(items);
       } finally {
         setLoading(false);
       }
     })();
   }, []);
 
-  // --- handlers passed down to planner ---
+  // Called by MonthlyPlanner – just forwards to /api/plan
   async function onSubmit(payload: {
     userId: string;
     locationId: string;
-    month: string; // YYYY-MM
+    month: string;                    // YYYY-MM
     lines: { date: string; itemId: string }[];
   }): Promise<void> {
-    const supa = supabaseBrowser();
-    const { data: { session } } = await supa.auth.getSession();
-    const token = session?.access_token || '';
-
+    const token = getSupabaseAccessToken();
     const r = await fetch('/api/plan', {
       method: 'POST',
       credentials: 'include',
@@ -78,72 +85,22 @@ export default function Page() {
     if (!r.ok) throw new Error(await r.text());
   }
 
+  // (Not currently used by the planner, but keep it wired)
   async function getKitchenSummary(from: string, to: string): Promise<KitchenSummary> {
+    const token = getSupabaseAccessToken();
     const r = await fetch(
-      `/api/kitchen?from=${from}&to=${to}&locationId=${user?.locationId ?? HQ_LOCATION_ID}`,
-      { credentials: 'include' }
+      `/api/kitchen?from=${from}&to=${to}&locationId=${encodeURIComponent(
+        user?.locationId ?? HQ_LOCATION_ID,
+      )}`,
+      {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      },
     );
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Failed to load');
     return j as KitchenSummary;
   }
-
-  // ---------- "My week" (user-only selections) ----------
-  const [mine, setMine] = useState<MyDay[] | null>(null);
-  const [mineLoading, setMineLoading] = useState(false);
-  const [mineError, setMineError] = useState<string | null>(null);
-
-  // Compute THIS week's Mon..Fri in local time
-  const { weekFrom, weekTo, weekFromDisp, weekToDisp } = useMemo(() => {
-    const today = new Date();
-    const dow = today.getDay(); // 0..6 (Sun..Sat)
-    const monday = new Date(today);
-    monday.setHours(0, 0, 0, 0);
-    monday.setDate(today.getDate() - ((dow + 6) % 7));
-    const friday = new Date(monday);
-    friday.setDate(monday.getDate() + 4);
-    const fromIso = fmtIsoLocal(monday);
-    const toIso = fmtIsoLocal(friday);
-    return {
-      weekFrom: fromIso,
-      weekTo: toIso,
-      weekFromDisp: fmtDDMMYYYY(fromIso),
-      weekToDisp: fmtDDMMYYYY(toIso),
-    };
-  }, []);
-
-  async function loadMine() {
-    if (!user?.locationId) {
-      setMineError('No location set on your profile.');
-      return;
-    }
-
-    const supa = supabaseBrowser();
-    const { data: { session } } = await supa.auth.getSession();
-    const token = session?.access_token || '';
-
-    setMineLoading(true);
-    setMineError(null);
-    try {
-      const r = await fetch(
-        `/api/plan?from=${encodeURIComponent(weekFrom)}&to=${encodeURIComponent(
-          weekTo
-        )}&locationId=${encodeURIComponent(user.locationId)}`,
-        {
-          credentials: 'include',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }
-      );
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || 'Failed to load');
-      setMine(j.days as MyDay[]);
-    } catch (e: any) {
-      setMineError(e?.message || 'Failed to load');
-    } finally {
-      setMineLoading(false);
-    }
-  }
-  // ------------------------------------------------------
 
   if (loading || !user) {
     return <div className="p-4 text-sm text-gray-600">Loading…</div>;

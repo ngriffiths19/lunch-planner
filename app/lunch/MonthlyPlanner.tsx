@@ -1,27 +1,45 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { supabaseBrowser } from '../lib/supabase-browser';
 
-type MenuItem = { id: string; name: string; active?: boolean; archived?: boolean; category?: string };
+type MenuItem = { id: string; name: string; category: string; active?: boolean };
 type User = { id: string; name?: string; email?: string; locationId: string };
 type KitchenItem = { itemId: string; name: string; qty: number };
 type KitchenSession = { session: '12:30' | '13:00' | null; items: KitchenItem[] };
 type KitchenDay = { date: string; sessions: KitchenSession[] };
 type KitchenSummary = { byDate: KitchenDay[] };
-type MyDay = { date: string; items: string[] };
 
-// ---- date helpers (LOCAL) ----
-const isoLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const ddmmyyyy = (iso: string) => { const [y,m,day]=iso.split('-'); return `${day}-${m}-${y}`; };
-const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
-const endOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth()+1, 0);
-function startOfWeekMonday(d: Date) {
-  const c = new Date(d); const dow = c.getDay(); const delta=(dow+6)%7;
-  c.setDate(c.getDate()-delta); c.setHours(0,0,0,0); return c;
+type DayChoice =
+  | { kind: 'hot'; hotId: string | null }
+  | { kind: 'cold'; mainId: string | null; sideId: string | null; snackId: string | null };
+
+const HQ_LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
+
+function isoLocal(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
+function yyyymm(iso: string) {
+  const [y,m] = iso.split('-'); return `${y}-${m}`;
+}
+function fmtDDMM(iso: string) {
+  const [y,m,d] = iso.split('-'); return `${d}-${m}-${y}`;
+}
+function monthBounds(year: number, monthIndex0: number) {
+  const start = new Date(year, monthIndex0, 1);
+  const end = new Date(year, monthIndex0 + 1, 0);
+  return { start, end };
+}
+function isWeekend(d: Date) { const dow = d.getDay(); return dow === 0 || dow === 6; }
 
-export default function MonthlyPlanner(props: {
+export default function MonthlyPlanner({
+  menu,
+  user,
+  onSubmit,
+  getKitchenSummary,
+}: {
   menu: MenuItem[];
   user: User;
   onSubmit: (payload: {
@@ -32,187 +50,210 @@ export default function MonthlyPlanner(props: {
   }) => Promise<void>;
   getKitchenSummary: (from: string, to: string) => Promise<KitchenSummary>;
 }) {
-  const { menu, user, onSubmit, getKitchenSummary } = props;
+  const today = new Date();
+  const [viewYear, setViewYear] = useState(today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(today.getMonth()); // 0..11
 
-  // ---------- Month nav ----------
-  const now = new Date();
-  const [monthKey, setMonthKey] = useState(() => `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`);
+  // Categorise menu for quick filtering
+  const hotItems = useMemo(() => menu.filter(m => m.category === 'hot' && m.active !== false)
+                      .sort((a,b)=>a.name.localeCompare(b.name)), [menu]);
+  const coldMains = useMemo(() => menu.filter(m => m.category === 'cold_main' && m.active !== false)
+                      .sort((a,b)=>a.name.localeCompare(b.name)), [menu]);
+  const coldSides = useMemo(() => menu.filter(m => m.category === 'cold_side' && m.active !== false)
+                      .sort((a,b)=>a.name.localeCompare(b.name)), [menu]);
+  const snacksCrisps = useMemo(() => menu.filter(m => m.category === 'snack_crisps' && m.active !== false)
+                      .sort((a,b)=>a.name.localeCompare(b.name)), [menu]);
+  const snacksFruit  = useMemo(() => menu.filter(m => m.category === 'snack_fruit' && m.active !== false)
+                      .sort((a,b)=>a.name.localeCompare(b.name)), [menu]);
 
-  const { firstDay, lastDay, weeks } = useMemo(() => {
-    const [y, m] = monthKey.split('-').map(Number);
-    const first = startOfMonth(new Date(y, m-1, 1));
-    const last  = endOfMonth(first);
-    const gridStart = startOfWeekMonday(first);
-    const w: { iso: string; inMonth: boolean }[][] = [];
-    let cur = new Date(gridStart);
-    for (let row=0; row<6; row++) {
-      const cells: { iso: string; inMonth: boolean }[] = [];
-      for (let i=0;i<5;i++) { // Mon..Fri
-        const d = new Date(cur);
-        cells.push({ iso: isoLocal(d), inMonth: d.getMonth()===first.getMonth() });
-        cur.setDate(cur.getDate()+1);
-      }
-      cur.setDate(cur.getDate()+2); // skip weekend
-      w.push(cells);
-      if (cells.every(c => new Date(c.iso) > last && !c.inMonth)) break;
-    }
-    return { firstDay: isoLocal(first), lastDay: isoLocal(last), weeks: w };
-  }, [monthKey]);
+  const snackAll = useMemo(() => [...snacksCrisps, ...snacksFruit].sort((a,b)=>a.name.localeCompare(b.name)), [snacksCrisps, snacksFruit]);
 
-  // ---------- Filtered menu (active + not archived) ----------
-  const filteredMenu = useMemo(
-    () => (menu ?? []).filter(x => x.active !== false && x.archived !== true),
-    [menu]
-  );
+  const { start, end } = useMemo(() => monthBounds(viewYear, viewMonth), [viewYear, viewMonth]);
+  const workdayIsos = useMemo(()=>{
+    const arr: string[] = []; const cur = new Date(start);
+    while (cur <= end) { if (!isWeekend(cur)) arr.push(isoLocal(cur)); cur.setDate(cur.getDate()+1); }
+    return arr;
+  }, [start, end]);
 
-  // ---------- Selections ----------
-  const [selections, setSelections] = useState<Record<string, string[]>>({});
-  const toggle = (date: string, itemId: string) => setSelections(prev => {
-    const cur = new Set(prev[date] ?? []);
-    cur.has(itemId) ? cur.delete(itemId) : cur.add(itemId);
-    return { ...prev, [date]: Array.from(cur) };
-  });
+  // One choice per workday
+  const [choices, setChoices] = useState<Record<string, DayChoice>>({});
 
-  // ---------- Kitchen summary ----------
-  const [summaryLoading, setSummaryLoading] = useState(false);
-  const [summary, setSummary] = useState<KitchenSummary | null>(null);
-  async function refreshSummary() {
-    setSummaryLoading(true);
-    try { setSummary(await getKitchenSummary(firstDay, lastDay)); }
-    catch (e) { console.error(e); }
-    finally { setSummaryLoading(false); }
+  // My week (names returned by API)
+  const [mine, setMine] = useState<{ date: string; items: string[] }[] | null>(null);
+  const [msg, setMsg] = useState<{ kind:'ok'|'error'; text:string }|null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    // reset choices when month changes (optional: could fetch existing plan too)
+    setChoices(prev => {
+      const next: Record<string, DayChoice> = {};
+      for (const iso of workdayIsos) next[iso] = prev[iso] ?? { kind:'hot', hotId: null };
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workdayIsos.join('|')]);
+
+  function setKind(iso: string, kind: 'hot'|'cold') {
+    setChoices(prev => {
+      const prevDay = prev[iso];
+      if (kind === 'hot') return { ...prev, [iso]: { kind:'hot', hotId: prevDay?.kind==='hot' ? prevDay.hotId ?? null : null } };
+      return { ...prev, [iso]: { kind:'cold', mainId: null, sideId: null, snackId: null } };
+    });
   }
-  useEffect(() => { void refreshSummary(); /* eslint-disable-next-line */ }, [firstDay, lastDay, user.locationId]);
+  function setHot(iso: string, id: string | null) {
+    setChoices(prev => ({ ...prev, [iso]: { kind:'hot', hotId: id } }));
+  }
+  function setCold(iso: string, field: 'mainId'|'sideId'|'snackId', id: string | null) {
+    setChoices(prev => {
+      const cur = prev[iso];
+      const base: DayChoice = cur && cur.kind === 'cold' ? cur : { kind:'cold', mainId: null, sideId: null, snackId: null };
+      return { ...prev, [iso]: { ...base, [field]: id } as DayChoice };
+    });
+  }
 
-  // ---------- Submit ----------
-  const [submitting, setSubmitting] = useState(false);
-  const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
-  async function handleSubmit() {
-    setMsg(null); setSubmitting(true);
+  async function submitAll() {
+    setSaving(true); setMsg(null);
     try {
+      // Translate choices -> lines (hot=1 item; cold=3 items)
       const lines: { date: string; itemId: string }[] = [];
-      for (const [date, ids] of Object.entries(selections)) for (const id of ids) lines.push({ date, itemId: id });
-      await onSubmit({ userId: user.id, locationId: user.locationId, month: monthKey, lines });
-      setMsg({ kind: 'ok', text: 'Saved!' }); void refreshSummary();
-    } catch (e: any) {
-      let text = e?.message || 'Save failed'; try { const j = JSON.parse(text); if (j?.error) text = j.error; } catch {}
-      setMsg({ kind: 'error', text });
-    } finally { setSubmitting(false); }
-  }
-
-  // ---------- My week ----------
-  const [mine, setMine] = useState<MyDay[] | null>(null);
-  const [mineLoading, setMineLoading] = useState(false);
-  const [mineError, setMineError] = useState<string | null>(null);
-  const { weekFrom, weekTo, weekFromDisp, weekToDisp } = useMemo(() => {
-    const mon = startOfWeekMonday(new Date()); const fri = new Date(mon); fri.setDate(mon.getDate()+4);
-    const f = isoLocal(mon), t = isoLocal(fri); return { weekFrom:f, weekTo:t, weekFromDisp:ddmmyyyy(f), weekToDisp:ddmmyyyy(t) };
-  }, []);
-  async function loadMyWeek() {
-    setMineError(null); setMineLoading(true);
-    try {
-      const supa = supabaseBrowser(); const { data: { session } } = await supa.auth.getSession();
-      const token = session?.access_token || '';
-      const r = await fetch(`/api/plan?from=${encodeURIComponent(weekFrom)}&to=${encodeURIComponent(weekTo)}&locationId=${encodeURIComponent(user.locationId)}`, {
-        credentials: 'include',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      for (const iso of workdayIsos) {
+        const c = choices[iso];
+        if (!c) continue;
+        if (c.kind === 'hot') {
+          if (c.hotId) lines.push({ date: iso, itemId: c.hotId });
+        } else {
+          if (c.mainId && c.sideId && c.snackId) {
+            lines.push({ date: iso, itemId: c.mainId });
+            lines.push({ date: iso, itemId: c.sideId });
+            lines.push({ date: iso, itemId: c.snackId });
+          }
+        }
+      }
+      const month = yyyymm(workdayIsos[0] ?? isoLocal(new Date()));
+      await onSubmit({
+        userId: user.id,
+        locationId: user.locationId ?? HQ_LOCATION_ID,
+        month,
+        lines,
       });
-      const j = await r.json(); if (!r.ok) throw new Error(j?.error || 'Failed to load');
-      setMine(j.days as MyDay[]);
-    } catch (e:any) { setMineError(e?.message || 'Failed to load'); }
-    finally { setMineLoading(false); }
+      setMsg({ kind:'ok', text:'Saved!' });
+    } catch (e:any) {
+      setMsg({ kind:'error', text: e?.message || 'Save failed' });
+    } finally {
+      setSaving(false);
+    }
   }
 
-  // ---------- Render ----------
+  async function loadMyWeek() {
+    setMsg(null); setMine(null);
+    try {
+      // Compute current week Mon..Fri
+      const now = new Date();
+      const dow = (now.getDay()+6)%7; const mon = new Date(now); mon.setDate(now.getDate()-dow);
+      const fri = new Date(mon); fri.setDate(mon.getDate()+4);
+      const from = isoLocal(mon), to = isoLocal(fri);
+      const r = await fetch(`/api/plan?from=${from}&to=${to}&locationId=${user.locationId ?? HQ_LOCATION_ID}`, { credentials:'include' });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Load failed');
+      // j.days = [{ date, items: [names] }]
+      setMine(j.days ?? []);
+    } catch (e:any) {
+      setMsg({ kind:'error', text: e?.message || 'Load failed' });
+    }
+  }
+
+  function prevMonth() {
+    const d = new Date(viewYear, viewMonth, 1); d.setMonth(d.getMonth()-1);
+    setViewYear(d.getFullYear()); setViewMonth(d.getMonth());
+  }
+  function nextMonth() {
+    const d = new Date(viewYear, viewMonth, 1); d.setMonth(d.getMonth()+1);
+    setViewYear(d.getFullYear()); setViewMonth(d.getMonth());
+  }
+
   return (
     <div className="space-y-4">
-      {/* Top bar */}
-      <div className="flex flex-wrap items-center gap-3">
-        <button className="rounded-lg border px-3 py-1 hover:bg-gray-50" onClick={()=>{
-          const [y,m]=monthKey.split('-').map(Number); const prev=new Date(y,m-2,1);
-          setMonthKey(`${prev.getFullYear()}-${String(prev.getMonth()+1).padStart(2,'0')}`);
-        }}>◀ Prev</button>
-
-        <div className="text-lg font-semibold tracking-wide">{monthKey}</div>
-
-        <button className="rounded-lg border px-3 py-1 hover:bg-gray-50" onClick={()=>{
-          const [y,m]=monthKey.split('-').map(Number); const next=new Date(y,m,1);
-          setMonthKey(`${next.getFullYear()}-${String(next.getMonth()+1).padStart(2,'0')}`);
-        }}>Next ▶</button>
-
-        <div className="ml-auto text-sm text-gray-600">
-          {summaryLoading ? 'Loading kitchen…' : summary ? 'Kitchen summary ready' : ''}
+      <div className="flex items-center justify-between">
+        <div className="text-lg font-semibold">Monthly Planner</div>
+        <div className="flex items-center gap-2">
+          <button className="border rounded px-3 py-1" onClick={prevMonth}>← Prev</button>
+          <div className="text-sm font-medium">
+            {start.toLocaleString(undefined, { month:'long', year:'numeric' })}
+          </div>
+          <button className="border rounded px-3 py-1" onClick={nextMonth}>Next →</button>
         </div>
       </div>
+      {msg && <div className={`text-sm ${msg.kind==='ok'?'text-green-700':'text-red-600'}`}>{msg.text}</div>}
 
-      {/* Headers */}
-      <div className="grid grid-cols-5 gap-2 text-xs font-semibold text-gray-600">
-        <div className="px-2">Mon</div><div className="px-2">Tue</div><div className="px-2">Wed</div><div className="px-2">Thu</div><div className="px-2">Fri</div>
-      </div>
+      {/* Calendar grid Mon..Fri only */}
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {workdayIsos.map(iso => {
+          const c = choices[iso] ?? { kind:'hot', hotId: null } as DayChoice;
+          return (
+            <div key={iso} className="rounded-xl border p-3 shadow-sm">
+              <div className="font-medium mb-2">{fmtDDMM(iso)}</div>
 
-      {/* Calendar grid */}
-      <div className="grid grid-cols-5 gap-2">
-        {weeks.map((row, i) => (
-          <div key={`row-${i}`} className="contents">
-            {row.map(cell => {
-              const items = filteredMenu;
-              return (
-                <div key={cell.iso}
-                  className={`rounded-xl border p-2 min-h-36 shadow-sm ${cell.inMonth ? 'bg-white' : 'bg-gray-50 opacity-60'} hover:shadow-md transition`}
-                >
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-medium">{ddmmyyyy(cell.iso)}</span>
-                    {/* selection count pill */}
-                    <span className="text-[10px] rounded-full px-2 py-0.5 border">
-                      {selections[cell.iso]?.length || 0}
-                    </span>
-                  </div>
-                  <div className="space-y-1 max-h-40 overflow-auto pr-1">
-                    {items.map(mi => {
-                      const picked = selections[cell.iso]?.includes(mi.id);
-                      return (
-                        <label key={mi.id}
-                          className={`flex items-center gap-2 text-xs rounded-lg px-2 py-1 cursor-pointer ${picked ? 'bg-blue-50 border border-blue-200' : 'hover:bg-gray-50'}`}
-                        >
-                          <input type="checkbox" checked={!!picked} onChange={()=>toggle(cell.iso, mi.id)} />
-                          <span className="truncate">{mi.name}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
+              {/* Toggle Hot / Cold */}
+              <div className="flex items-center gap-3 mb-2 text-sm">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" name={`kind-${iso}`} checked={c.kind==='hot'} onChange={()=>setKind(iso,'hot')} />
+                  Hot
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" name={`kind-${iso}`} checked={c.kind==='cold'} onChange={()=>setKind(iso,'cold')} />
+                  Cold
+                </label>
+              </div>
+
+              {c.kind === 'hot' ? (
+                <select className="border rounded px-3 py-2 w-full" value={c.hotId ?? ''}
+                        onChange={(e)=> setHot(iso, e.target.value || null)}>
+                  <option value="">— Select hot —</option>
+                  {hotItems.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                </select>
+              ) : (
+                <div className="space-y-2">
+                  <select className="border rounded px-3 py-2 w-full" value={(c as any).mainId ?? ''}
+                          onChange={(e)=> setCold(iso, 'mainId', e.target.value || null)}>
+                    <option value="">— Cold main —</option>
+                    {coldMains.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                  </select>
+                  <select className="border rounded px-3 py-2 w-full" value={(c as any).sideId ?? ''}
+                          onChange={(e)=> setCold(iso, 'sideId', e.target.value || null)}>
+                    <option value="">— Cold side —</option>
+                    {coldSides.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                  </select>
+                  <select className="border rounded px-3 py-2 w-full" value={(c as any).snackId ?? ''}
+                          onChange={(e)=> setCold(iso, 'snackId', e.target.value || null)}>
+                    <option value="">— Snack (crisps/fruit) —</option>
+                    {snackAll.map(mi => <option key={mi.id} value={mi.id}>{mi.name}</option>)}
+                  </select>
                 </div>
-              );
-            })}
-          </div>
-        ))}
+              )}
+            </div>
+          );
+        })}
       </div>
 
-      {/* Submit */}
       <div className="flex items-center gap-3">
-        <button className="rounded-lg border px-4 py-2 font-medium hover:bg-gray-50" onClick={()=>void handleSubmit()} disabled={submitting}>
-          {submitting ? 'Saving…' : 'Submit selections'}
+        <button className="rounded border px-4 py-2 hover:bg-gray-50" onClick={()=>void submitAll()} disabled={saving}>
+          {saving ? 'Saving…' : 'Submit month'}
         </button>
-        {msg && <span className={`text-sm ${msg.kind==='ok'?'text-green-700':'text-red-600'}`}>{msg.text}</span>}
+        <button className="rounded border px-3 py-2 hover:bg-gray-50" onClick={()=>void loadMyWeek()}>
+          My week
+        </button>
       </div>
 
-      {/* My week */}
-      <div className="mt-1 flex items-center gap-2">
-        <button className="rounded-lg border px-3 py-2 hover:bg-gray-50" onClick={()=>void loadMyWeek()}>
-          My week ({ddmmyyyy(weekFrom)} → {ddmmyyyy(weekTo)})
-        </button>
-        {mineLoading && <span className="text-sm text-gray-500">Loading…</span>}
-        {mineError && <span className="text-sm text-red-600">{mineError}</span>}
-      </div>
       {mine && (
-        <div className="rounded-xl border p-3">
+        <div className="mt-3 border rounded p-3">
           <div className="font-medium mb-1">Your selections</div>
-          {mine.length===0 ? <div className="text-sm text-gray-500">No selections this week.</div> : (
-            <ul className="text-sm space-y-1">
-              {mine.map(d => (
-                <li key={d.date}><span className="font-semibold">{ddmmyyyy(d.date)}:</span> {d.items.join(', ')}</li>
-              ))}
-            </ul>
-          )}
+          <ul className="text-sm space-y-1">
+            {mine.map(d => (
+              <li key={d.date}>
+                <span className="font-semibold">{fmtDDMM(d.date)}:</span> {d.items.join(', ')}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>
