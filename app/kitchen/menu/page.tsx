@@ -1,130 +1,143 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useToast } from '../../components/Toast';
+import { useEffect, useMemo, useState } from 'react';
+import { supabaseBrowser } from '../../lib/supabase-browser';
 
-type Cat = 'hot'|'cold_main'|'cold_side'|'cold_extra';
-type Item = { id: string; name: string; active: boolean; category: Cat };
+type MenuItem = { id: string; name: string; active?: boolean; archived?: boolean; category?: string };
+type Day = { iso: string; items: string[] };
+
+const HQ_LOCATION_ID = 'cdfad621-d9d1-4801-942e-eab2e07d94e4';
+
+function isoLocal(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 export default function KitchenMenuPage() {
-  const [items, setItems] = useState<Item[]>([]);
-  const [name, setName] = useState('');
-  const [newCat, setNewCat] = useState<Cat>('hot');
-  const [editing, setEditing] = useState<Record<string, { name: string; category: Cat }>>({});
-  const [busy, setBusy] = useState(false);
-  const { push } = useToast();
+  const [menu, setMenu] = useState<MenuItem[]>([]);
+  const [days, setDays] = useState<Day[]>([]); // this week Mon..Fri by default
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok'|'error'; text: string }|null>(null);
 
-  async function load() {
-    const r = await fetch('/api/menu', { cache: 'no-store', credentials: 'include' });
-    const j = await r.json();
-    if (!r.ok) { push({ text: j.error || 'Failed to load', kind: 'error' }); return; }
-    setItems(j.items as Item[]);
-  }
-  useEffect(() => { void load(); }, []);
+  // Compute this week Mon..Fri
+  const { weekFrom, weekTo } = useMemo(() => {
+    const today = new Date();
+    const dow = (today.getDay() + 6) % 7; // 0=Mon
+    const mon = new Date(today); mon.setDate(today.getDate() - dow); mon.setHours(0,0,0,0);
+    const fri = new Date(mon); fri.setDate(mon.getDate() + 4);
+    return { weekFrom: isoLocal(mon), weekTo: isoLocal(fri) };
+  }, []);
 
-  async function addItem() {
-    if (!name.trim()) return;
-    setBusy(true);
-    const r = await fetch('/api/menu', {
-      method: 'POST', credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name.trim(), active: true, category: newCat }),
+  // Fetch helper always attaching auth
+  async function authedFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+    const supa = supabaseBrowser();
+    const { data: { session } } = await supa.auth.getSession();
+    const token = session?.access_token || '';
+    return fetch(input, {
+      ...init,
+      credentials: 'include',
+      headers: {
+        ...(init.headers || {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
     });
-    setBusy(false);
-    if (!r.ok) { push({ text: (await r.json()).error || 'Add failed', kind: 'error' }); return; }
-    setName(''); push({ text: 'Added' }); void load();
   }
 
-  async function archive(id: string) {
-    if (!window.confirm('Archive this item? It will be hidden from the list.')) return;
-    const r = await fetch(`/api/menu?id=${encodeURIComponent(id)}`, { method: 'PATCH', credentials: 'include' });
-    if (!r.ok) { push({ text: (await r.json()).error || 'Archive failed', kind:'error' }); return; }
-    push({ text: 'Archived' }); void load();
+  // Load base menu (active + not archived) and any existing daily assignments for the week
+  useEffect(() => {
+    (async () => {
+      setMsg(null);
+      try {
+        const rm = await authedFetch('/api/menu', { cache: 'no-store' });
+        const mj = await rm.json();
+        if (!rm.ok) throw new Error(mj.error || 'Failed to load menu');
+        const filtered = (mj.items as MenuItem[]).filter(x => x.active !== false && x.archived !== true);
+        setMenu(filtered);
+
+        const rd = await authedFetch(`/api/daily-menu?from=${weekFrom}&to=${weekTo}&locationId=${HQ_LOCATION_ID}`, { cache:'no-store' });
+        const dj = await rd.json();
+        if (!rd.ok) throw new Error(dj.error || 'Failed to load daily menu');
+        // Expect dj.days = [{ date:'YYYY-MM-DD', itemIds:[...] }]
+        const mapped: Day[] = (dj.days ?? []).map((d: any)=>({ iso: d.date, items: d.itemIds ?? [] }));
+        // Fill missing days (Mon..Fri) with empty arrays
+        const list: Day[] = [];
+        const start = new Date(weekFrom); const end = new Date(weekTo);
+        for (let cur=new Date(start); cur<=end; cur.setDate(cur.getDate()+1)) {
+          const iso = isoLocal(cur);
+          const found = mapped.find(x => x.iso === iso);
+          list.push(found ?? { iso, items: [] });
+        }
+        setDays(list);
+      } catch (e:any) {
+        setMsg({ kind: 'error', text: e?.message || 'Load failed' });
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekFrom, weekTo]);
+
+  function toggle(iso: string, itemId: string) {
+    setDays(prev => prev.map(d => d.iso !== iso
+      ? d
+      : { ...d, items: d.items.includes(itemId) ? d.items.filter(x=>x!==itemId) : [...d.items, itemId] }
+    ));
   }
 
-  function startEdit(it: Item) {
-    setEditing(e => ({ ...e, [it.id]: { name: it.name, category: it.category } }));
-  }
-  function cancelEdit(id: string) {
-    setEditing(e => { const n={...e}; delete n[id]; return n; });
-  }
-  async function saveEdit(id: string) {
-    const edit = editing[id];
-    if (!edit) return;
-    const r = await fetch('/api/menu', {
-      method: 'POST', credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name: edit.name.trim(), category: edit.category }),
-    });
-    if (!r.ok) { push({ text: (await r.json()).error || 'Rename failed', kind:'error' }); return; }
-    push({ text: 'Saved' }); cancelEdit(id); void load();
+  async function save() {
+    setSaving(true); setMsg(null);
+    try {
+      const payload = {
+        locationId: HQ_LOCATION_ID,
+        from: weekFrom,
+        to: weekTo,
+        days: days.map(d => ({ date: d.iso, itemIds: d.items })),
+      };
+      const r = await authedFetch('/api/daily-menu', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json().catch(()=> ({}));
+      if (!r.ok) throw new Error(j.error || 'Save failed');
+      setMsg({ kind: 'ok', text: 'Saved!' });
+    } catch (e:any) {
+      setMsg({ kind: 'error', text: e?.message || 'Save failed' });
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
-    <div className="p-4 max-w-4xl mx-auto space-y-4">
-      <h1 className="text-xl font-semibold">Menu items</h1>
+    <div className="p-4 space-y-4">
+      <h1 className="text-lg font-semibold">Kitchen &rsaquo; Weekly Menu</h1>
+      <div className="text-sm text-gray-600">Week: {weekFrom} → {weekTo}</div>
 
-      <div className="flex gap-2 flex-wrap">
-        <input className="border rounded px-3 py-2 flex-1 min-w-[240px]" placeholder="New dish name…"
-               value={name} onChange={e=>setName(e.target.value)} />
-        <select className="border rounded px-2 py-2" value={newCat} onChange={(e)=>setNewCat(e.target.value as Cat)}>
-          <option value="hot">Hot</option>
-          <option value="cold_main">Cold • Main</option>
-          <option value="cold_side">Cold • Side</option>
-          <option value="cold_extra">Cold • Crisps/Fruit</option>
-        </select>
-        <button className="border rounded px-3 py-2" onClick={()=>void addItem()} disabled={busy}>Add</button>
-        <button className="border rounded px-3 py-2" onClick={()=>void load()}>Refresh</button>
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {days.map(d => (
+          <div key={d.iso} className="rounded-xl border p-3 shadow-sm">
+            <div className="font-medium mb-2">{d.iso}</div>
+            <div className="space-y-1 max-h-48 overflow-auto pr-1">
+              {menu.map(mi => {
+                const picked = d.items.includes(mi.id);
+                return (
+                  <label key={mi.id}
+                    className={`flex items-center gap-2 text-sm rounded px-2 py-1 cursor-pointer ${picked ? 'bg-blue-50 border border-blue-200' : 'hover:bg-gray-50'}`}>
+                    <input type="checkbox" checked={picked} onChange={()=>toggle(d.iso, mi.id)} />
+                    <span className="truncate">{mi.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
-      <div className="border rounded-xl overflow-hidden">
-        <div className="grid grid-cols-4 bg-gray-50 text-sm font-semibold px-3 py-2">
-          <div>Name</div><div>Category</div><div>Status</div><div className="text-right">Actions</div>
-        </div>
-        {items.map(it => {
-          const ed = editing[it.id];
-          return (
-            <div key={it.id} className="grid grid-cols-4 items-center px-3 py-2 border-t gap-2">
-              <div>
-                {ed ? (
-                  <input className="border rounded px-2 py-1 w-full"
-                         value={ed.name} onChange={e=>setEditing(s=>({ ...s, [it.id]: { ...ed, name: e.target.value } }))}/>
-                ) : (
-                  <div className="truncate">{it.name}</div>
-                )}
-              </div>
-              <div>
-                {ed ? (
-                  <select className="border rounded px-2 py-1"
-                          value={ed.category}
-                          onChange={e=>setEditing(s=>({ ...s, [it.id]: { ...ed, category: e.target.value as Cat } }))}>
-                    <option value="hot">Hot</option>
-                    <option value="cold_main">Cold • Main</option>
-                    <option value="cold_side">Cold • Side</option>
-                    <option value="cold_extra">Cold • Crisps/Fruit</option>
-                  </select>
-                ) : (
-                  <span className="text-sm">{it.category}</span>
-                )}
-              </div>
-              <div className="text-green-700 text-sm">Active</div>
-              <div className="flex justify-end gap-2">
-                {ed ? (
-                  <>
-                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>void saveEdit(it.id)}>Save</button>
-                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>cancelEdit(it.id)}>Cancel</button>
-                  </>
-                ) : (
-                  <>
-                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>startEdit(it)}>Edit</button>
-                    <button className="border rounded px-2 py-1 text-sm" onClick={()=>void archive(it.id)}>Archive</button>
-                  </>
-                )}
-              </div>
-            </div>
-          );
-        })}
-        {items.length === 0 && <div className="px-3 py-6 text-sm text-gray-500">No active items.</div>}
+      <div className="flex items-center gap-3">
+        <button className="rounded-lg border px-4 py-2 hover:bg-gray-50" onClick={()=>void save()} disabled={saving}>
+          {saving ? 'Saving…' : 'Save week'}
+        </button>
+        {msg && <span className={`text-sm ${msg.kind==='ok'?'text-green-700':'text-red-600'}`}>{msg.text}</span>}
       </div>
     </div>
   );
