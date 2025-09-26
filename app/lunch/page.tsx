@@ -157,34 +157,6 @@ export default function Page() {
         onSubmit={onSubmit}
         getKitchenSummary={getKitchenSummary}
       />
-
-      {/* My week controls */}
-      <div className="flex items-center gap-2">
-        <button className="border rounded px-3 py-2" onClick={() => void loadMine()}>
-          My week ({weekFromDisp} → {weekToDisp})
-        </button>
-        {mineLoading && <span className="text-sm text-gray-500">Loading…</span>}
-        {mineError && <span className="text-sm text-red-600">{mineError}</span>}
-      </div>
-
-      {/* My week panel */}
-      {mine && (
-        <div className="border rounded p-3">
-          <div className="font-medium mb-1">Your selections</div>
-          {mine.length === 0 ? (
-            <div className="text-sm text-gray-500">No selections this week.</div>
-          ) : (
-            <ul className="text-sm space-y-1">
-              {mine.map((d) => (
-                <li key={d.date}>
-                  <span className="font-semibold">{fmtDDMMYYYY(d.date)}:</span>{' '}
-                  {d.items.join(', ')}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
     </div>
   );
 }
