@@ -8,6 +8,14 @@ import { supabaseService } from '../../lib/supabase';
 
 type Cat = 'hot' | 'cold_main' | 'cold_side' | 'cold_extra';
 
+// --- helpers ---
+function firstDayOfMonthFromISO(isoDate: string): string {
+  // isoDate = "YYYY-MM-DD" or "YYYY-MM"
+  const y = isoDate.slice(0, 4);
+  const m = isoDate.slice(5, 7);
+  return `${y}-${m}-01`;
+}
+
 /** Try to resolve the user from Authorization bearer or auth cookies */
 async function getUserFromRequest(req: NextRequest) {
   // 1) Bearer
@@ -26,7 +34,6 @@ async function getUserFromRequest(req: NextRequest) {
 
 /**
  * GET /api/plan?from=YYYY-MM-DD&to=YYYY-MM-DD&locationId=UUID
- * Returns { days: [{date, items[]}] } for the signed-in user.
  */
 export async function GET(req: NextRequest) {
   const user = await getUserFromRequest(req);
@@ -42,7 +49,6 @@ export async function GET(req: NextRequest) {
 
   const svc = supabaseService();
 
-  // Step 1: plans for user/location
   const { data: plans, error: pErr } = await svc
     .from('plans')
     .select('id, date')
@@ -56,7 +62,6 @@ export async function GET(req: NextRequest) {
   const planIds = (plans ?? []).map(p => p.id);
   if (planIds.length === 0) return NextResponse.json({ days: [] });
 
-  // Step 2: plan_lines + item names
   const { data: lines, error: lErr } = await svc
     .from('plan_lines')
     .select('date, item_id, menu_items(name), plan_id')
@@ -88,26 +93,25 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const svc = supabaseService();
 
-  // Read body first (needed for fallback)
   const body = await req.json().catch(() => ({}));
 
   // Try normal user resolution
   let user = await getUserFromRequest(req);
 
-  // Fallback: verify body.userId via Admin API (secure, no spoofing)
+  // Fallback: verify body.userId via Admin API (secure)
   if (!user && body?.userId) {
     const { data, error } = await svc.auth.admin.getUserById(body.userId);
-    if (!error && data?.user) {
-      user = data.user;
-    }
+    if (!error && data?.user) user = data.user;
   }
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   // --------- A) Legacy batch payload ----------
   if (Array.isArray(body?.lines)) {
     const locationId = body.locationId as string | undefined;
+    const monthKey = body.month as string | undefined; // "YYYY-MM"
     if (!locationId) return NextResponse.json({ error: 'locationId required' }, { status: 400 });
 
+    // Build map date -> itemIds
     const byDate = new Map<string, string[]>();
     for (const ln of body.lines as Array<{ date: string; itemId: string }>) {
       if (!ln?.date || !ln?.itemId) continue;
@@ -117,9 +121,15 @@ export async function POST(req: NextRequest) {
     }
 
     for (const [date, itemIds] of byDate.entries()) {
+      // compute month (prefer batch monthKey, otherwise from each date)
+      const monthISO = monthKey ? `${monthKey}-01` : firstDayOfMonthFromISO(date);
+
       const { data: plan, error: pErr } = await svc
         .from('plans')
-        .upsert({ user_id: user.id, date, location_id: locationId }, { onConflict: 'user_id,date,location_id' })
+        .upsert(
+          { user_id: user.id, date, month: monthISO, location_id: locationId },
+          { onConflict: 'user_id,date,location_id' }
+        )
         .select('id')
         .single();
       if (pErr) return NextResponse.json({ error: pErr.message }, { status: 400 });
@@ -170,9 +180,14 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  const monthISO = firstDayOfMonthFromISO(date);
+
   const { data: plan, error: pErr } = await svc
     .from('plans')
-    .upsert({ user_id: user.id, date, location_id: locationId }, { onConflict: 'user_id,date,location_id' })
+    .upsert(
+      { user_id: user.id, date, month: monthISO, location_id: locationId },
+      { onConflict: 'user_id,date,location_id' }
+    )
     .select('id')
     .single();
   if (pErr) return NextResponse.json({ error: pErr.message }, { status: 400 });

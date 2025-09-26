@@ -1,16 +1,49 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { supabaseBrowser } from '../lib/supabase-browser';
 
-// TYPES (align with your page.tsx)
+// Types (kept aligned with /lunch/page.tsx)
 type MenuItem = { id: string; name: string; active?: boolean };
 type User = { id: string; name?: string; email?: string; locationId: string };
 type KitchenItem = { itemId: string; name: string; qty: number };
 type KitchenSession = { session: '12:30' | '13:00' | null; items: KitchenItem[] };
 type KitchenDay = { date: string; sessions: KitchenSession[] };
 type KitchenSummary = { byDate: KitchenDay[] };
+type MyDay = { date: string; items: string[] };
 
-// Props
+// ---- date helpers (LOCAL timezone) ----
+function isoLocal(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function ddmmyyyy(iso: string) {
+  const [y, m, d] = iso.split('-');
+  return `${d}-${m}-${y}`;
+}
+function startOfMonth(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function endOfMonth(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0);
+}
+function startOfWeekMonday(d: Date) {
+  const copy = new Date(d);
+  const dow = copy.getDay(); // Sun=0..Sat=6
+  const delta = (dow + 6) % 7; // days since Monday
+  copy.setDate(copy.getDate() - delta);
+  copy.setHours(0, 0, 0, 0);
+  return copy;
+}
+
+/**
+ * Props:
+ * - menu, user from page
+ * - onSubmit: legacy batch payload saver (we build { userId, locationId, month, lines })
+ * - getKitchenSummary: already implemented on page
+ */
 export default function MonthlyPlanner(props: {
   menu: MenuItem[];
   user: User;
@@ -24,7 +57,7 @@ export default function MonthlyPlanner(props: {
 }) {
   const { menu, user, onSubmit, getKitchenSummary } = props;
 
-  // ----------- Month grid (Mon–Fri only) -----------
+  // ---------- Month navigation ----------
   const today = new Date();
   const [monthKey, setMonthKey] = useState<string>(() => {
     const y = today.getFullYear();
@@ -32,62 +65,69 @@ export default function MonthlyPlanner(props: {
     return `${y}-${m}`; // YYYY-MM
   });
 
-  function startOfMonth(d: Date) {
-    return new Date(d.getFullYear(), d.getMonth(), 1);
-  }
-  function endOfMonth(d: Date) {
-    return new Date(d.getFullYear(), d.getMonth() + 1, 0);
-  }
-  function fmtIsoLocal(d: Date) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }
-
-  // Compute month bounds + list of weekdays
-  const { monthStart, monthEnd, days } = useMemo(() => {
+  const { firstDay, lastDay, grid } = useMemo(() => {
+    // first and last day of chosen month
     const [y, m] = monthKey.split('-').map(Number);
-    const first = new Date(y, m - 1, 1);
+    const first = startOfMonth(new Date(y, m - 1, 1));
     const last = endOfMonth(first);
-    const list: string[] = [];
-    for (let d = new Date(first); d <= last; d.setDate(d.getDate() + 1)) {
-      const dow = d.getDay(); // Sun=0..Sat=6
-      if (dow >= 1 && dow <= 5) list.push(fmtIsoLocal(new Date(d)));
+
+    // find the Monday that starts the first week row
+    const gridStart = startOfWeekMonday(first);
+    // we’ll render up to 6 weeks (Mon–Fri only)
+    const weeks: { iso: string; inMonth: boolean }[][] = [];
+    let cursor = new Date(gridStart);
+
+    for (let w = 0; w < 6; w++) {
+      const row: { iso: string; inMonth: boolean }[] = [];
+      // Monday..Friday (skip weekends)
+      for (let i = 0; i < 5; i++) {
+        const d = new Date(cursor); // Mon+offset
+        const iso = isoLocal(d);
+        const inMonth = d.getMonth() === first.getMonth();
+        row.push({ iso, inMonth });
+        // advance one day
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      // Skip the weekend quickly
+      cursor.setDate(cursor.getDate() + 2);
+      // Stop if every cell is beyond last day and not in month
+      const allPast = row.every(c => new Date(c.iso) > last && !c.inMonth);
+      weeks.push(row);
+      if (allPast) break;
     }
-    return { monthStart: fmtIsoLocal(first), monthEnd: fmtIsoLocal(last), days: list };
+
+    return { firstDay: isoLocal(first), lastDay: isoLocal(last), grid: weeks };
   }, [monthKey]);
 
-  // ----------- Selection state -----------
-  // For each date, store one or more itemIds (legacy batch mode supports multi)
-  const [selections, setSelections] = useState<Record<string, string[]>>({}); // { 'YYYY-MM-DD': ['itemUuid', ...] }
-
-  function toggleSelection(date: string, itemId: string) {
+  // ---------- Selections (multi-select per day; legacy batch) ----------
+  const [selections, setSelections] = useState<Record<string, string[]>>({});
+  function toggle(date: string, itemId: string) {
     setSelections(prev => {
       const cur = new Set(prev[date] ?? []);
-      if (cur.has(itemId)) cur.delete(itemId); else cur.add(itemId);
+      if (cur.has(itemId)) cur.delete(itemId);
+      else cur.add(itemId);
       return { ...prev, [date]: Array.from(cur) };
     });
   }
 
-  // ----------- Kitchen summary for visible month -----------
+  // ---------- Kitchen summary for the visible month ----------
   const [summary, setSummary] = useState<KitchenSummary | null>(null);
-  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+
   async function refreshSummary() {
-    setLoadingSummary(true);
+    setSummaryLoading(true);
     try {
-      const s = await getKitchenSummary(monthStart, monthEnd);
+      const s = await getKitchenSummary(firstDay, lastDay);
       setSummary(s);
     } catch (e) {
-      // swallow UI-wise; this is optional
       console.error('Kitchen summary error', e);
     } finally {
-      setLoadingSummary(false);
+      setSummaryLoading(false);
     }
   }
-  useEffect(() => { void refreshSummary(); /* eslint-disable-next-line */ }, [monthStart, monthEnd, user.locationId]);
+  useEffect(() => { void refreshSummary(); /* eslint-disable-next-line */ }, [firstDay, lastDay, user.locationId]);
 
-  // ----------- Submit -----------
+  // ---------- Submit (shows success/error) ----------
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
@@ -95,7 +135,7 @@ export default function MonthlyPlanner(props: {
     setMsg(null);
     setSubmitting(true);
     try {
-      // Build legacy batch payload
+      // Build { userId, locationId, month, lines[] }
       const lines: { date: string; itemId: string }[] = [];
       for (const [date, items] of Object.entries(selections)) {
         for (const itemId of items) lines.push({ date, itemId });
@@ -107,10 +147,8 @@ export default function MonthlyPlanner(props: {
         lines,
       });
       setMsg({ kind: 'ok', text: 'Saved!' });
-      // Optionally refresh the kitchen summary after save
       void refreshSummary();
     } catch (e: any) {
-      // Surface exact server response text
       let text = e?.message || 'Save failed';
       try {
         const parsed = JSON.parse(text);
@@ -123,60 +161,107 @@ export default function MonthlyPlanner(props: {
     }
   }
 
-  // ----------- UI -----------
+  // ---------- "My week" (Mon–Fri of THIS week, user-only) ----------
+  const [mine, setMine] = useState<MyDay[] | null>(null);
+  const [mineLoading, setMineLoading] = useState(false);
+  const [mineError, setMineError] = useState<string | null>(null);
+
+  const { weekFrom, weekTo, weekFromDisp, weekToDisp } = useMemo(() => {
+    const monday = startOfWeekMonday(new Date());
+    const friday = new Date(monday);
+    friday.setDate(monday.getDate() + 4);
+    const fromIso = isoLocal(monday);
+    const toIso = isoLocal(friday);
+    return {
+      weekFrom: fromIso, weekTo: toIso,
+      weekFromDisp: ddmmyyyy(fromIso),
+      weekToDisp: ddmmyyyy(toIso),
+    };
+  }, []);
+
+  async function loadMyWeek() {
+    if (!user?.locationId) {
+      setMineError('No location set on your profile.');
+      return;
+    }
+    setMineLoading(true);
+    setMineError(null);
+    try {
+      // Include bearer token to be resilient across domains
+      const supa = supabaseBrowser();
+      const { data: { session } } = await supa.auth.getSession();
+      const token = session?.access_token || '';
+
+      const r = await fetch(
+        `/api/plan?from=${encodeURIComponent(weekFrom)}&to=${encodeURIComponent(
+          weekTo
+        )}&locationId=${encodeURIComponent(user.locationId)}`,
+        {
+          credentials: 'include',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }
+      );
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || 'Failed to load');
+      setMine(j.days as MyDay[]);
+    } catch (e: any) {
+      setMineError(e?.message || 'Failed to load');
+    } finally {
+      setMineLoading(false);
+    }
+  }
+
+  // ---------- Render ----------
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center">
+      {/* Top bar */}
+      <div className="flex flex-wrap gap-2 items-center">
         <button
           className="border rounded px-3 py-1"
           onClick={() => {
             const [y, m] = monthKey.split('-').map(Number);
             const prev = new Date(y, m - 2, 1);
-            setMonthKey(`${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`);
+            const key = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+            setMonthKey(key);
           }}
         >
           ◀ Prev
         </button>
-        <div className="font-medium">{monthKey}</div>
+
+        <div className="font-semibold">
+          {monthKey}
+        </div>
+
         <button
           className="border rounded px-3 py-1"
           onClick={() => {
             const [y, m] = monthKey.split('-').map(Number);
             const next = new Date(y, m, 1);
-            setMonthKey(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`);
+            const key = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
+            setMonthKey(key);
           }}
         >
           Next ▶
         </button>
+
         <div className="ml-auto text-sm text-gray-600">
-          {loadingSummary ? 'Loading kitchen…' : summary ? 'Kitchen summary ready' : ''}
+          {summaryLoading ? 'Loading kitchen…' : summary ? 'Kitchen summary ready' : ''}
         </div>
       </div>
 
-      {/* Very simple list grid (replace with your calendar cells) */}
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {days.map(date => (
-          <div key={date} className="border rounded p-3">
-            <div className="font-medium mb-2">{new Date(date).toLocaleDateString()}</div>
-            <div className="space-y-1">
-              {menu.map(mi => {
-                const picked = selections[date]?.includes(mi.id);
-                return (
-                  <label key={mi.id} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={!!picked}
-                      onChange={() => toggleSelection(date, mi.id)}
-                    />
-                    <span>{mi.name}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </div>
+      {/* Weekday headers */}
+      <div className="grid grid-cols-5 gap-2 text-xs font-medium text-gray-600">
+        <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div>
+      </div>
+
+      {/* Calendar grid: rows of Mon..Fri */}
+      <div className="grid grid-cols-5 gap-2">
+        {grid.map((row, idx) => (
+          <FragmentRow key={`w-${idx}`} row={row} menu={menu} selections={selections} toggle={toggle} />
         ))}
       </div>
 
+      {/* Submit */}
       <div className="flex gap-2 items-center">
         <button
           className="border rounded px-4 py-2"
@@ -191,6 +276,74 @@ export default function MonthlyPlanner(props: {
           </span>
         )}
       </div>
+
+      {/* My week */}
+      <div className="mt-2 flex items-center gap-2">
+        <button className="border rounded px-3 py-2" onClick={() => void loadMyWeek()}>
+          My week ({weekFromDisp} → {weekToDisp})
+        </button>
+        {mineLoading && <span className="text-sm text-gray-500">Loading…</span>}
+        {mineError && <span className="text-sm text-red-600">{mineError}</span>}
+      </div>
+
+      {mine && (
+        <div className="border rounded p-3">
+          <div className="font-medium mb-1">Your selections</div>
+          {mine.length === 0 ? (
+            <div className="text-sm text-gray-500">No selections this week.</div>
+          ) : (
+            <ul className="text-sm space-y-1">
+              {mine.map((d) => (
+                <li key={d.date}>
+                  <span className="font-semibold">{ddmmyyyy(d.date)}:</span>{' '}
+                  {d.items.join(', ')}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+/** A row with 5 weekday cells */
+function FragmentRow({
+  row,
+  menu,
+  selections,
+  toggle,
+}: {
+  row: { iso: string; inMonth: boolean }[];
+  menu: MenuItem[];
+  selections: Record<string, string[]>;
+  toggle: (date: string, itemId: string) => void;
+}) {
+  return (
+    <>
+      {row.map((c) => (
+        <div
+          key={c.iso}
+          className={`border rounded p-2 min-h-32 ${c.inMonth ? '' : 'opacity-40 bg-gray-50'}`}
+        >
+          <div className="text-xs mb-1 font-medium">{ddmmyyyy(c.iso)}</div>
+          <div className="space-y-1">
+            {menu.map((mi) => {
+              const picked = selections[c.iso]?.includes(mi.id);
+              return (
+                <label key={mi.id} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={!!picked}
+                    onChange={() => toggle(c.iso, mi.id)}
+                  />
+                  <span>{mi.name}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
